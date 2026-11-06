@@ -13,14 +13,50 @@ time limits, and turns it back off when it exits.
 
 ## Install
 
+Clone the repo:
+
 ```bash
-mkdir -p ~/bin && cp claude-awake ~/bin/ && chmod +x ~/bin/claude-awake
+git clone https://github.com/frankvm04/claude-awake.git ~/src/claude-awake
+```
+
+Link the script into a folder on your PATH:
+
+```bash
+mkdir -p ~/bin && ln -sf ~/src/claude-awake/claude-awake ~/bin/claude-awake
 ```
 
 If `~/bin` is not on your PATH yet (zsh is the default shell on macOS):
 
 ```bash
 echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
+```
+
+Check that it works:
+
+```bash
+claude-awake status
+```
+
+`git` is not installed on a new Mac. The first `git` command offers to install the
+Command Line Tools; accept, then run the clone again.
+
+### Update
+
+Because `~/bin/claude-awake` links to the clone, pulling updates the command:
+
+```bash
+git -C ~/src/claude-awake pull
+```
+
+Stop a running `claude-awake` (Ctrl-C) before updating, then start it again.
+
+### Without git
+
+Download [`claude-awake`](https://raw.githubusercontent.com/frankvm04/claude-awake/main/claude-awake)
+and install it directly:
+
+```bash
+mkdir -p ~/bin && curl -fsSL https://raw.githubusercontent.com/frankvm04/claude-awake/main/claude-awake -o ~/bin/claude-awake && chmod +x ~/bin/claude-awake
 ```
 
 Optional: skip the password prompt. This adds a sudoers rule that allows only
@@ -36,7 +72,7 @@ claude-awake setup-sudo
 claude-awake                 # awake until Ctrl-C
 claude-awake -l -c           # open Claude, stay awake until Claude quits
 claude-awake -t 3 -b 30      # at most 3 hours; stop if battery drops to 30%
-claude-awake -v -c            # log events; stop when Claude quits
+claude-awake -v -c           # log events; stop when Claude quits
 claude-awake status          # what's the current state?
 claude-awake stop            # restore normal sleep (e.g. after a force-kill)
 ```
@@ -107,7 +143,7 @@ sudo pmset -a disablesleep 0
   connected. If the screen still glows, run `pmset displaysleepnow` by hand.
 - Works on Apple Silicon and Intel Macs, using the stock macOS `/bin/bash` (3.2).
 - To uninstall: `claude-awake remove-sudo` (if you ran setup-sudo), then delete
-  `~/bin/claude-awake` and `~/.claude-awake/`.
+  `~/bin/claude-awake`, `~/.claude-awake/`, and the clone (`~/src/claude-awake`).
 
 ## License
 
