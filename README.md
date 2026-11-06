@@ -86,6 +86,24 @@ Optional: skip the password prompt. This adds a sudoers rule that allows only
 claude-awake setup-sudo
 ```
 
+### Uninstall
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/frankvm04/claude-awake/main/install.sh | bash -s -- --uninstall
+```
+
+Or, from the clone: `~/src/claude-awake/install.sh --uninstall`. This:
+
+- restores normal sleep, if a run is active or a crashed run left sleep turned off
+- removes the `setup-sudo` rule, if there is one
+- removes `~/bin/claude-awake`, the clone, `~/.claude-awake/`, and the PATH line
+  the installer added
+
+It may ask for your password (to restore sleep or remove the sudo rule). It leaves
+anything it doesn't recognize alone, and keeps the clone if it has uncommitted
+changes. If you installed into other folders, set the same `CLAUDE_AWAKE_DIR` /
+`CLAUDE_AWAKE_BIN` when uninstalling.
+
 ## Use
 
 ```bash
@@ -162,8 +180,7 @@ sudo pmset -a disablesleep 0
   and repeats that every 30 seconds while the lid stays closed. Wi-Fi stays
   connected. If the screen still glows, run `pmset displaysleepnow` by hand.
 - Works on Apple Silicon and Intel Macs, using the stock macOS `/bin/bash` (3.2).
-- To uninstall: `claude-awake remove-sudo` (if you ran setup-sudo), then delete
-  `~/bin/claude-awake`, `~/.claude-awake/`, and the clone (`~/src/claude-awake`).
+- To uninstall, see [Uninstall](#uninstall).
 
 ## License
 
