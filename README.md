@@ -1,4 +1,4 @@
-# claude-awake
+# <img src="assets/icon.svg" alt="" height="32" align="absmiddle"> claude-awake
 
 A terminal tool for macOS that keeps your MacBook awake with the lid closed, so
 the Claude desktop app or Claude Code keeps working. When you stop it, the normal
