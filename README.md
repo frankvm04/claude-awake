@@ -13,6 +13,25 @@ time limits, and turns it back off when it exits.
 
 ## Install
 
+One line in Terminal:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/frankvm04/claude-awake/main/install.sh | bash
+```
+
+This clones the repo to `~/src/claude-awake`, links the command into `~/bin`, and
+adds `~/bin` to your PATH if needed. Without git (a new Mac with no Command Line
+Tools), it downloads the script instead. Then open a new Terminal window and run
+`claude-awake status`. You can [read the installer](install.sh) before running it.
+
+To use other folders, set them in front of `bash`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/frankvm04/claude-awake/main/install.sh | CLAUDE_AWAKE_DIR=~/code/claude-awake CLAUDE_AWAKE_BIN=~/.local/bin bash
+```
+
+### Manual install
+
 Clone the repo:
 
 ```bash
@@ -42,7 +61,8 @@ Command Line Tools; accept, then run the clone again.
 
 ### Update
 
-Because `~/bin/claude-awake` links to the clone, pulling updates the command:
+Run the one-line installer again, or pull. Because `~/bin/claude-awake` links to
+the clone, pulling updates the command:
 
 ```bash
 git -C ~/src/claude-awake pull
