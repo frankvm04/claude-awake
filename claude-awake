@@ -1,0 +1,452 @@
+#!/bin/bash
+#
+# claude-awake — keep your MacBook (and the Claude app / Claude Code) running
+#                while the lid is closed.
+#
+# How it works
+#   * `pmset -a disablesleep 1` stops the Mac from sleeping when the lid is closed.
+#     (`caffeinate` alone can NOT do this; it only blocks idle sleep.)
+#   * `caffeinate -ims` additionally blocks idle/disk/system sleep while it runs.
+#   * When the lid closes, `pmset displaysleepnow` turns the screen off (with
+#     disablesleep=1 macOS may otherwise leave the panel lit under the lid).
+#   * When claude-awake exits (Ctrl-C, timer, battery guard, Claude quit, terminal
+#     closed), the original sleep setting is restored.
+#
+# Written for the stock macOS bash 3.2. No bash-4 features.
+
+set -u
+
+VERSION="1.0.0"
+PROG="$(basename "$0")"
+STATE_DIR="${HOME}/.claude-awake"
+ORIG_FILE="${STATE_DIR}/original-sleep-disabled"   # value to restore
+PID_FILE="${STATE_DIR}/pid"
+SUDOERS_FILE="/etc/sudoers.d/claude-awake"
+PMSET="/usr/bin/pmset"
+IOREG="/usr/sbin/ioreg"
+
+# Defaults (override with flags)
+BATTERY_MIN=20        # restore sleep when on battery and at/below this %
+MAX_HOURS=0           # 0 = no time limit
+UNTIL_CLAUDE_EXITS=0  # 1 = stop once Claude is no longer running
+LAUNCH_APP=0          # 1 = open the Claude desktop app on start
+INTERVAL=30           # seconds between checks
+VERBOSE=0             # 1 = print timestamped event log lines
+
+CAFF_PID=""
+CLEANED_UP=0
+
+if [ -t 1 ]; then
+  B=$'\033[1m'; DIM=$'\033[2m'; RED=$'\033[31m'; GRN=$'\033[32m'; YLW=$'\033[33m'; RST=$'\033[0m'
+else
+  B=""; DIM=""; RED=""; GRN=""; YLW=""; RST=""
+fi
+
+say()  { printf '%s\n' "$*"; }
+info() { printf '%s==>%s %s\n' "$B" "$RST" "$*"; }
+ok()   { printf '%s✓%s %s\n' "$GRN" "$RST" "$*"; }
+warn() { printf '%s!%s %s\n' "$YLW" "$RST" "$*" >&2; }
+die()  { printf '%s✗ %s:%s %s\n' "$RED" "$PROG" "$RST" "$*" >&2; exit 1; }
+
+notify() {
+  # macOS notification banner; harmless if it fails.
+  /usr/bin/osascript -e "display notification \"$1\" with title \"claude-awake\"" >/dev/null 2>&1 || true
+}
+
+usage() {
+  cat <<EOF
+${B}claude-awake ${VERSION}${RST} — keep your Mac and Claude running with the lid closed
+
+${B}Usage${RST}
+  $PROG [start] [options]   Keep the Mac awake (lid closed OK) until Ctrl-C
+  $PROG stop                Restore normal sleep (use if a run was force-killed)
+  $PROG status              Show sleep setting, battery, and whether Claude is running
+  $PROG setup-sudo          Let pmset run without a password prompt (optional)
+  $PROG remove-sudo         Undo setup-sudo
+  $PROG help
+
+${B}Options for start${RST}
+  -c, --until-claude-exits  Stop automatically once Claude (app or CLI) quits
+  -l, --launch              Open the Claude desktop app first
+  -b, --battery-min N       On battery, stop at N% or below (default ${BATTERY_MIN}; 0 = off)
+  -t, --hours H             Stop after H hours (decimals OK, e.g. 2.5)
+  -i, --interval S          Seconds between checks (default ${INTERVAL})
+  -v, --verbose             Log events with timestamps (lid, screen, power,
+                            battery, Claude start/quit, sleep gaps)
+
+${B}Examples${RST}
+  $PROG                      # awake until you press Ctrl-C
+  $PROG -l -c                # open Claude, stay awake until it quits
+  $PROG -t 3 -b 30           # at most 3 hours; stop if battery drops to 30%
+  $PROG -v -c                # log lid/power/Claude events; stop when Claude quits
+
+${DIM}Safety: with the lid closed the Mac can still get hot. Leave it on a hard
+surface, not in a bag. Being plugged in is best for long runs.${RST}
+EOF
+}
+
+require_macos() {
+  [ "$(uname -s)" = "Darwin" ] || die "this tool only works on macOS."
+  [ -x "$PMSET" ] || die "$PMSET not found."
+}
+
+# ---------------------------------------------------------------- system probes
+
+sleep_disabled() {
+  # Prints 1 if lid-close sleep is currently disabled, else 0.
+  local v
+  v="$("$PMSET" -g 2>/dev/null | awk '/SleepDisabled/ {print $2; exit}')"
+  [ "$v" = "1" ] && echo 1 || echo 0
+}
+
+set_sleep_disabled() {
+  # $1 = 0|1. Tries non-interactive sudo first, then interactive if a terminal exists.
+  if sudo -n "$PMSET" -a disablesleep "$1" >/dev/null 2>&1; then return 0; fi
+  if [ -t 0 ]; then sudo "$PMSET" -a disablesleep "$1"; return $?; fi
+  return 1
+}
+
+# Sets globals: BATT_PCT (empty if no battery), ON_AC (1/0)
+read_battery() {
+  local out
+  out="$("$PMSET" -g batt 2>/dev/null)"
+  BATT_PCT="$(printf '%s\n' "$out" | grep -Eo '[0-9]+%' | head -n1 | tr -d '%')"
+  if printf '%s\n' "$out" | head -n1 | grep -q "AC Power"; then ON_AC=1; else ON_AC=0; fi
+}
+
+lid_closed() {
+  # The lid sensor is exposed in the I/O Registry: AppleClamshellState = Yes when closed.
+  "$IOREG" -r -k AppleClamshellState -d 4 2>/dev/null | grep -q '"AppleClamshellState" = Yes'
+}
+
+screen_off() {
+  # With disablesleep=1 macOS may leave the built-in panel lit under a closed lid,
+  # so turn the display off explicitly. No sudo needed.
+  "$PMSET" displaysleepnow >/dev/null 2>&1 || true
+}
+
+claude_running() {
+  # Claude desktop app (process "Claude") or Claude Code CLI (native "claude"
+  # binary, or the npm build running under node).
+  pgrep -ix claude >/dev/null 2>&1 && return 0
+  pgrep -f '(^|/| )claude( |$)' >/dev/null 2>&1 && return 0
+  pgrep -f '@anthropic-ai/claude-code' >/dev/null 2>&1 && return 0
+  return 1
+}
+
+other_instance_pid() {
+  local pid
+  [ -f "$PID_FILE" ] || return 1
+  pid="$(cat "$PID_FILE" 2>/dev/null)"
+  [ -n "$pid" ] && [ "$pid" != "$$" ] && kill -0 "$pid" 2>/dev/null && { echo "$pid"; return 0; }
+  return 1
+}
+
+fmt_duration() {
+  local s=$1
+  printf '%dh%02dm%02ds' $((s / 3600)) $((s % 3600 / 60)) $((s % 60))
+}
+
+# ---------------------------------------------------------------- commands
+
+cmd_status() {
+  require_macos
+  local sd pid
+  sd="$(sleep_disabled)"
+  read_battery
+  say "${B}claude-awake status${RST}"
+  if [ "$sd" = "1" ]; then
+    say "  Lid-close sleep : ${GRN}disabled${RST} (Mac stays awake with lid closed)"
+  else
+    say "  Lid-close sleep : normal (Mac sleeps when lid closes)"
+  fi
+  if pid="$(other_instance_pid)"; then
+    say "  claude-awake    : ${GRN}running${RST} (pid $pid)"
+  else
+    say "  claude-awake    : not running"
+    if [ "$sd" = "1" ] && [ -f "$ORIG_FILE" ]; then
+      warn "A previous run ended without restoring sleep. Run: $PROG stop"
+    fi
+  fi
+  if claude_running; then say "  Claude          : ${GRN}running${RST}"; else say "  Claude          : not running"; fi
+  if lid_closed; then say "  Lid             : closed"; else say "  Lid             : open"; fi
+  if [ -n "$BATT_PCT" ]; then
+    if [ "$ON_AC" = "1" ]; then say "  Power           : AC, battery ${BATT_PCT}%"
+    else say "  Power           : battery ${BATT_PCT}%"; fi
+  else
+    say "  Power           : AC (no battery found)"
+  fi
+}
+
+cmd_stop() {
+  require_macos
+  local pid orig
+  if pid="$(other_instance_pid)"; then
+    info "Stopping running claude-awake (pid $pid)…"
+    kill -TERM "$pid" 2>/dev/null
+    # It restores sleep itself; wait briefly for it.
+    local i=0
+    while kill -0 "$pid" 2>/dev/null && [ $i -lt 20 ]; do sleep 0.25; i=$((i + 1)); done
+  fi
+  orig=0
+  [ -f "$ORIG_FILE" ] && orig="$(cat "$ORIG_FILE")"
+  if [ "$(sleep_disabled)" != "$orig" ]; then
+    set_sleep_disabled "$orig" || die "could not restore. Run manually: sudo pmset -a disablesleep 0"
+  fi
+  rm -f "$ORIG_FILE" "$PID_FILE"
+  ok "Normal sleep restored (SleepDisabled=$(sleep_disabled))."
+}
+
+cmd_setup_sudo() {
+  require_macos
+  local user tmp
+  user="$(id -un)"
+  tmp="$(mktemp)"
+  cat >"$tmp" <<EOF
+# Installed by claude-awake: allow $user to toggle lid-close sleep without a password.
+$user ALL=(root) NOPASSWD: $PMSET -a disablesleep 0, $PMSET -a disablesleep 1
+EOF
+  if ! /usr/sbin/visudo -cf "$tmp" >/dev/null; then rm -f "$tmp"; die "generated sudoers rule failed validation."; fi
+  info "Installing $SUDOERS_FILE (admin password required)…"
+  sudo install -m 0440 -o root -g wheel "$tmp" "$SUDOERS_FILE" || { rm -f "$tmp"; die "install failed."; }
+  rm -f "$tmp"
+  ok "Done. '$PROG' can now turn lid-close sleep on/off without asking for a password."
+  say "${DIM}The rule only allows: pmset -a disablesleep 0|1. Undo with: $PROG remove-sudo${RST}"
+}
+
+cmd_remove_sudo() {
+  require_macos
+  if [ -f "$SUDOERS_FILE" ]; then
+    sudo rm -f "$SUDOERS_FILE" && ok "Removed $SUDOERS_FILE."
+  else
+    say "Nothing to remove."
+  fi
+}
+
+cleanup() {
+  [ "$CLEANED_UP" = "1" ] && return
+  CLEANED_UP=1
+  printf '\n'
+  [ -n "$CAFF_PID" ] && kill "$CAFF_PID" 2>/dev/null
+  local orig=0
+  [ -f "$ORIG_FILE" ] && orig="$(cat "$ORIG_FILE")"
+  if set_sleep_disabled "$orig"; then
+    rm -f "$ORIG_FILE" "$PID_FILE"
+    ok "Sleep setting restored (SleepDisabled=$orig). Closing the lid will sleep normally."
+  else
+    rm -f "$PID_FILE"
+    warn "Could NOT restore the sleep setting. Run: $PROG stop   (or: sudo pmset -a disablesleep 0)"
+    notify "Could not restore sleep. Run: claude-awake stop"
+  fi
+}
+
+STATUS_LINE=""
+
+draw_status() {
+  [ -n "$STATUS_LINE" ] && printf '\r\033[K%s' "$STATUS_LINE"
+}
+
+event() {
+  # Verbose mode only: print a timestamped line above the live status line.
+  [ "$VERBOSE" = "1" ] || return 0
+  printf '\r\033[K%s%s%s  %s\n' "$DIM" "$(date '+%H:%M:%S')" "$RST" "$*"
+  draw_status
+}
+
+stop_with() {
+  # $1 = reason. Shown in terminal and as a notification.
+  event "Stopping: $1"
+  printf '\n'
+  info "$1"
+  notify "$1 — normal sleep restored."
+  exit 0
+}
+
+cmd_start() {
+  require_macos
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -c|--until-claude-exits) UNTIL_CLAUDE_EXITS=1 ;;
+      -l|--launch)             LAUNCH_APP=1 ;;
+      -b|--battery-min)        shift; BATTERY_MIN="${1:-}" ;;
+      -t|--hours)              shift; MAX_HOURS="${1:-}" ;;
+      -i|--interval)           shift; INTERVAL="${1:-}" ;;
+      -v|--verbose)            VERBOSE=1 ;;
+      -h|--help)               usage; exit 0 ;;
+      *) die "unknown option: $1 (see '$PROG help')" ;;
+    esac
+    shift
+  done
+
+  case "$BATTERY_MIN" in ''|*[!0-9]*) die "--battery-min needs a whole number 0-100." ;; esac
+  case "$INTERVAL"    in ''|*[!0-9]*|0) die "--interval needs a positive whole number." ;; esac
+  printf '%s' "$MAX_HOURS" | grep -Eq '^[0-9]+(\.[0-9]+)?$' || die "--hours needs a number, e.g. 2 or 1.5"
+  local max_secs
+  max_secs="$(awk -v h="$MAX_HOURS" 'BEGIN { printf "%d", h * 3600 }')"
+
+  local pid
+  if pid="$(other_instance_pid)"; then
+    die "already running (pid $pid). Use '$PROG status' or '$PROG stop'."
+  fi
+
+  mkdir -p "$STATE_DIR"
+
+  # Remember the value to restore. If a previous run crashed, keep ITS original.
+  local created_orig=0
+  if [ ! -f "$ORIG_FILE" ]; then
+    sleep_disabled >"$ORIG_FILE"; created_orig=1
+  fi
+
+  # Get sudo rights up front (no prompt if setup-sudo was run).
+  if ! sudo -n "$PMSET" -a disablesleep 1 >/dev/null 2>&1; then
+    info "Administrator password needed to change the lid-close sleep setting."
+    sudo -v || { [ "$created_orig" = 1 ] && rm -f "$ORIG_FILE"; die "sudo failed."; }
+  fi
+  echo $$ >"$PID_FILE"
+
+  trap cleanup EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
+
+  set_sleep_disabled 1 || die "could not disable sleep (pmset failed)."
+  /usr/bin/caffeinate -ims -w $$ &
+  CAFF_PID=$!
+
+  if [ "$LAUNCH_APP" = "1" ]; then
+    info "Opening Claude…"
+    open -a Claude 2>/dev/null || warn "Could not open the Claude app (is it installed in /Applications?)."
+    sleep 3
+  fi
+
+  local seen_claude=0
+  if [ "$UNTIL_CLAUDE_EXITS" = "1" ]; then
+    if claude_running; then seen_claude=1
+    else warn "Claude isn't running yet. I'll stop once it has started and then quit."; fi
+  fi
+
+  ok "Your Mac will stay awake with the lid closed. ${DIM}(Ctrl-C to stop)${RST}"
+  [ "$VERBOSE" = "1" ] && say "  • Verbose: logging lid, screen, power, battery and Claude events"
+  [ "$BATTERY_MIN" -gt 0 ] && say "  • Stops if on battery at ${BATTERY_MIN}% or below"
+  [ "$max_secs" -gt 0 ]    && say "  • Stops after ${MAX_HOURS} hour(s)"
+  [ "$UNTIL_CLAUDE_EXITS" = "1" ] && say "  • Stops when Claude quits"
+  say "  ${DIM}Keep it on a hard surface; don't put it in a bag while running.${RST}"
+  say ""
+
+  event "Lid-close sleep disabled (was SleepDisabled=$(cat "$ORIG_FILE" 2>/dev/null || echo 0))"
+
+  # Two cadences: the lid is checked every LID_TICK seconds (cheap) so the screen
+  # goes dark within ~2 s of closing; everything else runs every INTERVAL seconds.
+  local LID_TICK=2 SCREEN_REPEAT=30 GAP_WARN=20
+  local start=$SECONDS now prev_tick=$SECONDS elapsed gap
+  local claude_str="…" power_str="…" lid_str
+  local next_check=0 lid_was_closed=-1 lid_closed_at=0 last_screen_off=-999
+  local prev_on_ac="" prev_batt_step="" prev_claude="" sudo_warned=0 is_running
+  while :; do
+    now=$SECONDS
+
+    # A tick far longer than LID_TICK means the process was frozen: the Mac slept.
+    gap=$((now - prev_tick))
+    if [ "$gap" -gt $((LID_TICK + GAP_WARN)) ]; then
+      event "${YLW}No activity for $(fmt_duration "$gap") — the Mac appears to have slept${RST}"
+    fi
+    prev_tick=$now
+
+    if lid_closed; then
+      # On the close transition, and again every SCREEN_REPEAT s in case something
+      # (a notification, a USB event) woke the panel behind the lid.
+      if [ "$lid_was_closed" != "1" ]; then
+        screen_off; last_screen_off=$now; lid_closed_at=$now
+        event "Lid closed — screen turned off"
+      elif [ $((now - last_screen_off)) -ge "$SCREEN_REPEAT" ]; then
+        screen_off; last_screen_off=$now
+      fi
+      lid_was_closed=1
+      lid_str="closed, screen off"
+    else
+      if [ "$lid_was_closed" = "1" ]; then
+        event "Lid opened (was closed $(fmt_duration $((now - lid_closed_at))))"
+      elif [ "$lid_was_closed" = "-1" ]; then
+        event "Lid is open"
+      fi
+      lid_was_closed=0
+      lid_str="open"
+    fi
+
+    if [ "$now" -ge "$next_check" ]; then
+      next_check=$((now + INTERVAL))
+
+      # Keep the sudo timestamp fresh so the restore at exit doesn't need a password.
+      if ! sudo -n -v >/dev/null 2>&1 && ! sudo -n -l "$PMSET" -a disablesleep 0 >/dev/null 2>&1; then
+        if [ "$sudo_warned" = "0" ]; then
+          event "${YLW}sudo session expired — restoring sleep at exit may ask for your password${RST}"
+          sudo_warned=1
+        fi
+      fi
+
+      # Re-assert in case something else flipped it back.
+      if [ "$(sleep_disabled)" != "1" ]; then
+        event "${YLW}SleepDisabled was reset by something else — re-applying${RST}"
+        set_sleep_disabled 1 >/dev/null 2>&1 || event "${RED}Could not re-apply SleepDisabled=1${RST}"
+      fi
+
+      read_battery
+      if [ -z "$BATT_PCT" ]; then power_str="AC"
+      elif [ "$ON_AC" = "1" ]; then power_str="AC ${BATT_PCT}%"
+      else power_str="battery ${BATT_PCT}%"; fi
+
+      if [ -n "$BATT_PCT" ]; then
+        if [ "$ON_AC" != "$prev_on_ac" ]; then
+          if [ "$ON_AC" = "1" ]; then event "Power: AC adapter (${BATT_PCT}%)"
+          else event "Power: running on battery (${BATT_PCT}%)"; fi
+        elif [ "$ON_AC" = "0" ] && [ $((BATT_PCT / 5)) != "$prev_batt_step" ]; then
+          event "Battery ${BATT_PCT}%"
+        fi
+        prev_on_ac=$ON_AC; prev_batt_step=$((BATT_PCT / 5))
+      fi
+
+      if claude_running; then is_running=1; seen_claude=1; claude_str="${GRN}running${RST}"
+      else is_running=0; claude_str="not running"; fi
+      if [ "$is_running" != "$prev_claude" ]; then
+        if [ "$is_running" = "1" ]; then event "Claude is running"
+        elif [ -n "$prev_claude" ]; then event "Claude quit"
+        else event "Claude is not running"; fi
+        prev_claude=$is_running
+      fi
+    fi
+
+    elapsed=$((now - start))
+    STATUS_LINE="$(printf '%sawake%s %s │ %s │ lid %s │ Claude: %s' \
+      "$GRN" "$RST" "$(fmt_duration "$elapsed")" "$power_str" "$lid_str" "$claude_str")"
+    draw_status
+
+    if [ -n "$BATT_PCT" ] && [ "$ON_AC" = "0" ] && [ "$BATTERY_MIN" -gt 0 ] && [ "$BATT_PCT" -le "$BATTERY_MIN" ]; then
+      stop_with "Battery at ${BATT_PCT}% (limit ${BATTERY_MIN}%), letting the Mac sleep"
+    fi
+    if [ "$max_secs" -gt 0 ] && [ "$elapsed" -ge "$max_secs" ]; then
+      stop_with "Time limit of ${MAX_HOURS}h reached"
+    fi
+    if [ "$UNTIL_CLAUDE_EXITS" = "1" ] && [ "$seen_claude" = "1" ] && [ "$is_running" = "0" ]; then
+      stop_with "Claude has quit"
+    fi
+
+    # Sleep in the background + wait, so Ctrl-C/TERM are handled immediately.
+    sleep "$LID_TICK" &
+    wait $! 2>/dev/null
+  done
+}
+
+# ---------------------------------------------------------------- main
+
+case "${1:-start}" in
+  start)                  [ $# -gt 0 ] && shift; cmd_start "$@" ;;
+  -*)                     cmd_start "$@" ;;
+  stop|off)               cmd_stop ;;
+  status)                 cmd_status ;;
+  setup-sudo)             cmd_setup_sudo ;;
+  remove-sudo)            cmd_remove_sudo ;;
+  help|--help|-h)         usage ;;
+  version|--version|-V)   echo "claude-awake $VERSION" ;;
+  *)                      die "unknown command: $1 (see '$PROG help')" ;;
+esac
