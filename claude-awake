@@ -9,6 +9,8 @@
 #   * `caffeinate -ims` additionally blocks idle/disk/system sleep while it runs.
 #   * When the lid closes, `pmset displaysleepnow` turns the screen off (with
 #     disablesleep=1 macOS may otherwise leave the panel lit under the lid).
+#     Skipped while an external display is connected: that command sleeps every
+#     display, and macOS already switches the built-in panel off in clamshell mode.
 #   * When claude-awake exits (Ctrl-C, timer, battery guard, Claude quit, terminal
 #     closed), the original sleep setting is restored.
 #
@@ -24,6 +26,7 @@ PID_FILE="${STATE_DIR}/pid"
 SUDOERS_FILE="/etc/sudoers.d/claude-awake"
 PMSET="/usr/bin/pmset"
 IOREG="/usr/sbin/ioreg"
+SYSPROF="/usr/sbin/system_profiler"
 
 # Defaults (override with flags)
 BATTERY_MIN=20        # restore sleep when on battery and at/below this %
@@ -121,8 +124,29 @@ lid_closed() {
 
 screen_off() {
   # With disablesleep=1 macOS may leave the built-in panel lit under a closed lid,
-  # so turn the display off explicitly. No sudo needed.
+  # so turn the display off explicitly. No sudo needed. Note this sleeps EVERY
+  # display, so it must not be used while an external display is in use.
   "$PMSET" displaysleepnow >/dev/null 2>&1 || true
+}
+
+external_display_count() {
+  # Prints how many non-built-in displays are connected and online.
+  # system_profiler lists each display under a "Displays:" heading, one level
+  # deeper; the built-in panel says "Built-in" or "Connection Type: Internal".
+  # With the lid closed and an external display attached (clamshell mode) the
+  # built-in panel is usually not listed at all.
+  "$SYSPROF" SPDisplaysDataType 2>/dev/null | awk '
+    function flush() { if (name != "" && !skip) n++; name = ""; skip = 0 }
+    /^[[:space:]]*Displays:[[:space:]]*$/ { flush(); match($0, /^ */); din = RLENGTH; inblk = 1; next }
+    inblk {
+      if ($0 ~ /^[[:space:]]*$/) next
+      match($0, /^ */); ind = RLENGTH
+      if (ind <= din) { flush(); inblk = 0; next }
+      if (ind == din + 2 && $0 ~ /:[[:space:]]*$/) { flush(); name = $0; next }
+      l = tolower($0)
+      if (l ~ /built-in|connection type: internal|online: no/) skip = 1
+    }
+    END { flush(); print n + 0 }'
 }
 
 claude_running() {
@@ -170,6 +194,10 @@ cmd_status() {
   fi
   if claude_running; then say "  Claude          : ${GRN}running${RST}"; else say "  Claude          : not running"; fi
   if lid_closed; then say "  Lid             : closed"; else say "  Lid             : open"; fi
+  local ext
+  ext="$(external_display_count)"
+  if [ "$ext" -gt 0 ]; then say "  External display: $ext connected (screens are left on)"
+  else say "  External display: none"; fi
   if [ -n "$BATT_PCT" ]; then
     if [ "$ON_AC" = "1" ]; then say "  Power           : AC, battery ${BATT_PCT}%"
     else say "  Power           : battery ${BATT_PCT}%"; fi
@@ -338,11 +366,14 @@ cmd_start() {
 
   # Two cadences: the lid is checked every LID_TICK seconds (cheap) so the screen
   # goes dark within ~2 s of closing; everything else runs every INTERVAL seconds.
-  local LID_TICK=2 SCREEN_REPEAT=30 GAP_WARN=20
+  # External displays are checked every DISPLAY_CHECK s (system_profiler is slow),
+  # and immediately when the lid closes.
+  local LID_TICK=2 SCREEN_REPEAT=30 GAP_WARN=20 DISPLAY_CHECK=10
   local start=$SECONDS now prev_tick=$SECONDS elapsed gap
   local claude_str="…" power_str="…" lid_str
   local next_check=0 lid_was_closed=-1 lid_closed_at=0 last_screen_off=-999
   local prev_on_ac="" prev_batt_step="" prev_claude="" sudo_warned=0 is_running
+  local ext=0 prev_ext="" next_display_check=0
   while :; do
     now=$SECONDS
 
@@ -353,17 +384,40 @@ cmd_start() {
     fi
     prev_tick=$now
 
+    if [ "$now" -ge "$next_display_check" ]; then
+      next_display_check=$((now + DISPLAY_CHECK))
+      ext="$(external_display_count)"
+      if [ "$ext" != "$prev_ext" ]; then
+        if [ "$ext" -gt 0 ]; then
+          event "External display connected ($ext) — screens will be left on"
+        elif [ -n "$prev_ext" ]; then
+          event "External display disconnected"
+          last_screen_off=-999   # lid closed? turn the built-in panel off on this tick
+        fi
+        prev_ext=$ext
+      fi
+    fi
+
     if lid_closed; then
-      # On the close transition, and again every SCREEN_REPEAT s in case something
-      # (a notification, a USB event) woke the panel behind the lid.
       if [ "$lid_was_closed" != "1" ]; then
-        screen_off; last_screen_off=$now; lid_closed_at=$now
-        event "Lid closed — screen turned off"
-      elif [ $((now - last_screen_off)) -ge "$SCREEN_REPEAT" ]; then
+        lid_closed_at=$now
+        # Re-check now so closing the lid onto an external display never blanks it.
+        ext="$(external_display_count)"; prev_ext=$ext
+        next_display_check=$((now + DISPLAY_CHECK))
+        if [ "$ext" -gt 0 ]; then
+          event "Lid closed — external display in use, leaving it on"
+        else
+          screen_off; last_screen_off=$now
+          event "Lid closed — screen turned off"
+        fi
+      elif [ "$ext" -eq 0 ] && [ $((now - last_screen_off)) -ge "$SCREEN_REPEAT" ]; then
+        # Repeat every SCREEN_REPEAT s in case something (a notification, a USB
+        # event) woke the panel behind the lid.
         screen_off; last_screen_off=$now
       fi
       lid_was_closed=1
-      lid_str="closed, screen off"
+      if [ "$ext" -gt 0 ]; then lid_str="closed, external display on"
+      else lid_str="closed, screen off"; fi
     else
       if [ "$lid_was_closed" = "1" ]; then
         event "Lid opened (was closed $(fmt_duration $((now - lid_closed_at))))"

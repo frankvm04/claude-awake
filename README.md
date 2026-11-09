@@ -145,6 +145,7 @@ With `-v`, events print above the live status line:
 What gets logged:
 
 - The lid opening and closing, including how long it was closed.
+- External displays connecting and disconnecting.
 - The power source changing, and each 5% drop in battery while on battery.
 - Claude starting and quitting.
 - Anything that resets the sleep setting, and an expired sudo session.
@@ -179,6 +180,13 @@ sudo pmset -a disablesleep 0
   2 seconds. When the lid closes it turns the screen off (`pmset displaysleepnow`),
   and repeats that every 30 seconds while the lid stays closed. Wi-Fi stays
   connected. If the screen still glows, run `pmset displaysleepnow` by hand.
+- **External monitors:** `pmset displaysleepnow` turns off *every* display, so
+  claude-awake skips it while an external display is connected. With the lid
+  closed (clamshell mode), macOS turns the built-in screen off by itself and the
+  external monitor stays on. claude-awake checks for external displays every 10
+  seconds and whenever the lid closes. If you unplug the monitor while the lid is
+  closed, it turns the built-in screen off within about 10 seconds. The external
+  monitor still dims after your usual display-sleep time, as normal.
 - Works on Apple Silicon and Intel Macs, using the stock macOS `/bin/bash` (3.2).
 - To uninstall, see [Uninstall](#uninstall).
 
