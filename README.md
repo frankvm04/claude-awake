@@ -6,10 +6,19 @@ sleep setting comes back.
 
 ## Why not just `caffeinate`?
 
-`caffeinate` blocks *idle* sleep only. Closing the lid still puts the Mac to sleep.
-The only built-in setting that stops lid-close sleep (without an external monitor)
-is `sudo pmset -a disablesleep 1`. claude-awake turns that on, watches battery and
-time limits, and turns it back off when it exits.
+`caffeinate` blocks *idle* sleep only. Closing the lid still puts the Mac to sleep,
+unless an external display and power are connected (clamshell mode). The only
+built-in setting that stops lid-close sleep in every case is
+`sudo pmset -a disablesleep 1`. claude-awake turns that on, turns the screen off
+under the closed lid, watches battery and time limits, and turns the setting back
+off when it exits.
+
+## Requirements
+
+- macOS on Apple Silicon or Intel. It runs on the stock `/bin/bash` (3.2), with no
+  other dependencies.
+- An administrator account: changing the sleep setting uses `sudo`. To avoid the
+  password prompt, see [Skip the password prompt](#skip-the-password-prompt-optional).
 
 ## Install
 
@@ -79,12 +88,31 @@ and install it directly:
 mkdir -p ~/bin && curl -fsSL https://raw.githubusercontent.com/frankvm04/claude-awake/main/claude-awake -o ~/bin/claude-awake && chmod +x ~/bin/claude-awake
 ```
 
-Optional: skip the password prompt. This adds a sudoers rule that allows only
-`pmset -a disablesleep 0|1`:
+### Install a specific version
+
+Each release is tagged (see [Releases](https://github.com/frankvm04/claude-awake/releases)
+and the [changelog](CHANGELOG.md)). To use a tagged version from a clone:
+
+```bash
+git -C ~/src/claude-awake fetch --tags && git -C ~/src/claude-awake checkout v1.0.0
+```
+
+Or download that version's script directly:
+
+```bash
+mkdir -p ~/bin && curl -fsSL https://raw.githubusercontent.com/frankvm04/claude-awake/v1.0.0/claude-awake -o ~/bin/claude-awake && chmod +x ~/bin/claude-awake
+```
+
+### Skip the password prompt (optional)
+
+This adds a sudoers rule that allows only `pmset -a disablesleep 0|1` without a
+password:
 
 ```bash
 claude-awake setup-sudo
 ```
+
+Undo it with `claude-awake remove-sudo`.
 
 ### Uninstall
 
@@ -125,7 +153,21 @@ claude-awake stop            # restore normal sleep (e.g. after a force-kill)
 | `-v`, `--verbose` | Print a timestamped line for each event (see below) |
 
 Start it in a Terminal window, then close the lid. It keeps running and shows a
-status line (elapsed time, power, whether Claude is running).
+status line: elapsed time, power, the lid and screen state, and whether Claude is
+running. You can also start it with the lid already closed on an external monitor
+(clamshell mode); the monitor stays on.
+
+`claude-awake status` shows the current state at any time:
+
+```
+claude-awake status
+  Lid-close sleep : disabled (Mac stays awake with lid closed)
+  claude-awake    : running (pid 1284)
+  Claude          : running
+  Lid             : closed
+  External display: 1 connected (screens are left on)
+  Power           : AC, battery 92%
+```
 
 ## Event log (`-v`)
 
@@ -185,10 +227,14 @@ sudo pmset -a disablesleep 0
   closed (clamshell mode), macOS turns the built-in screen off by itself and the
   external monitor stays on. claude-awake checks for external displays every 10
   seconds and whenever the lid closes. If you unplug the monitor while the lid is
-  closed, it turns the built-in screen off within about 10 seconds. The external
-  monitor still dims after your usual display-sleep time, as normal.
-- Works on Apple Silicon and Intel Macs, using the stock macOS `/bin/bash` (3.2).
+  closed, it turns the built-in screen off within about 10 seconds. This also
+  holds when you start claude-awake with the lid already closed on a monitor. The
+  external monitor still dims after your usual display-sleep time, as normal.
 - To uninstall, see [Uninstall](#uninstall).
+
+## Changes
+
+See [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 

@@ -63,7 +63,7 @@ ${B}claude-awake ${VERSION}${RST} — keep your Mac and Claude running with the 
 ${B}Usage${RST}
   $PROG [start] [options]   Keep the Mac awake (lid closed OK) until Ctrl-C
   $PROG stop                Restore normal sleep (use if a run was force-killed)
-  $PROG status              Show sleep setting, battery, and whether Claude is running
+  $PROG status              Show sleep setting, lid, displays, power, and Claude
   $PROG setup-sudo          Let pmset run without a password prompt (optional)
   $PROG remove-sudo         Undo setup-sudo
   $PROG help
@@ -74,14 +74,16 @@ ${B}Options for start${RST}
   -b, --battery-min N       On battery, stop at N% or below (default ${BATTERY_MIN}; 0 = off)
   -t, --hours H             Stop after H hours (decimals OK, e.g. 2.5)
   -i, --interval S          Seconds between checks (default ${INTERVAL})
-  -v, --verbose             Log events with timestamps (lid, screen, power,
-                            battery, Claude start/quit, sleep gaps)
+  -v, --verbose             Log events with timestamps (lid, screen, external
+                            displays, power, battery, Claude, sleep gaps)
 
 ${B}Examples${RST}
   $PROG                      # awake until you press Ctrl-C
   $PROG -l -c                # open Claude, stay awake until it quits
   $PROG -t 3 -b 30           # at most 3 hours; stop if battery drops to 30%
   $PROG -v -c                # log lid/power/Claude events; stop when Claude quits
+
+With an external monitor connected, screens are left on (clamshell mode).
 
 ${DIM}Safety: with the lid closed the Mac can still get hot. Leave it on a hard
 surface, not in a bag. Being plugged in is best for long runs.${RST}
