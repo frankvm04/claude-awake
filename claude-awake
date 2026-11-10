@@ -22,7 +22,7 @@
 
 set -u
 
-VERSION="1.3.0"
+VERSION="1.4.0"
 PROG="$(basename "$0")"
 STATE_DIR="${HOME}/.claude-awake"
 ORIG_FILE="${STATE_DIR}/original-sleep-disabled"   # value to restore
@@ -46,6 +46,7 @@ MAX_PRESSURE=heavy    # sleep if thermal pressure stays at/above this (off = off
 HEAT_MINUTES=2        # how long it must stay too hot before sleeping
 LOW_POWER_AT=35       # Low Power Mode on battery at/below this % with the lid closed (0 = off)
 LOG_FILE=""           # --log FILE: also append every event to FILE as plain text
+UI_SIMPLE=0           # 1 = --simple: one status line, no banner or dashboard
 
 CAFF_PID=""
 CLEANED_UP=0
@@ -89,6 +90,7 @@ ${B}Options for start${RST}
   -v, --verbose             Log events with timestamps (lid, screen, external
                             displays, power, battery, heat, Claude, sleep gaps)
       --log FILE            Also append every event to FILE as plain text
+  -s, --simple              Simple display: one status line, no banner or dashboard
 
 ${B}Heat guard${RST} (puts the Mac to sleep if it stays too hot)
   -T, --max-temp C          Battery temperature limit in °C (default ${MAX_TEMP}; 0 = off)
@@ -530,7 +532,7 @@ cleanup() {
 # Three modes, chosen when claude-awake starts (ui_init):
 #   panel  a terminal at least 64 columns wide: a dashboard pinned at the bottom
 #          of the window, redrawn in place
-#   line   a narrower terminal: one status line, redrawn in place
+#   line   a narrower terminal, or --simple: one status line, redrawn in place
 #   plain  output isn't a terminal (piped, e.g. to tee): no redraws, plain lines
 # The event log (-v) scrolls above the panel or line. NO_COLOR turns colors off.
 # Drawing uses only bash built-ins (no subshells or helper programs per frame).
@@ -560,7 +562,7 @@ ui_init() {
     UI_MODE=line
     [ -z "${NO_COLOR:-}" ] && UI_COLOR=1
     ui_size
-    [ "$UI_COLS" -ge 64 ] && UI_MODE=panel
+    [ "$UI_COLS" -ge 64 ] && [ "$UI_SIMPLE" = "0" ] && UI_MODE=panel
   fi
   local e=$'\033'
   if [ "$UI_COLOR" = "1" ]; then
@@ -757,7 +759,7 @@ ui_resized() {
   done
   [ "$rows" -gt 0 ] && printf '\033[%dA\r\033[J' "$rows"
   UI_H=0; UI_W=()
-  if [ "$UI_COLS" -ge 64 ]; then UI_MODE=panel; else UI_MODE=line; fi
+  if [ "$UI_COLS" -ge 64 ] && [ "$UI_SIMPLE" = "0" ]; then UI_MODE=panel; else UI_MODE=line; fi
 }
 
 ui_draw() {
@@ -841,7 +843,7 @@ ui_splash() {
   local i n=${#CK_TEXT[@]} mark two=0 half
   if [ "$UI_MODE" = "plain" ]; then
     say "claude-awake $VERSION: keeping this MacBook awake with the lid closed."
-  elif [ "$UI_COLS" -lt 58 ]; then
+  elif [ "$UI_COLS" -lt 58 ] || [ "$UI_SIMPLE" = "1" ]; then
     printf '\n  %s%sclaude-awake%s %s%s%s\n' "$C_B" "$C_VIO" "$C_R" "$C_GRY2" "$VERSION" "$C_R"
   else
     local top=( "█▀▀" "█  " "▄▀█" "█ █" "█▀▄" "█▀▀" "▄▄▄" "▄▀█" "█ █ █" "▄▀█" "█▄▀" "█▀▀" )
@@ -937,6 +939,7 @@ cmd_start() {
       -i|--interval)           shift; INTERVAL="${1:-}" ;;
       -v|--verbose)            VERBOSE=1 ;;
       --log)                   shift; LOG_FILE="${1:-}"; [ -n "$LOG_FILE" ] || die "--log needs a file name." ;;
+      -s|--simple)             UI_SIMPLE=1 ;;
       -T|--max-temp)           shift; MAX_TEMP="${1:-}" ;;
       -P|--max-pressure)       shift; MAX_PRESSURE="${1:-}" ;;
       -H|--heat-minutes)       shift; HEAT_MINUTES="${1:-}" ;;

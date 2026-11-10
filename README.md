@@ -95,13 +95,13 @@ Each release is tagged (see [Releases](https://github.com/frankvm04/claude-awake
 and the [changelog](CHANGELOG.md)). To use a tagged version from a clone:
 
 ```bash
-git -C ~/src/claude-awake fetch --tags && git -C ~/src/claude-awake checkout v1.3.0
+git -C ~/src/claude-awake fetch --tags && git -C ~/src/claude-awake checkout v1.4.0
 ```
 
 Or download that version's script directly:
 
 ```bash
-mkdir -p ~/bin && curl -fsSL https://raw.githubusercontent.com/frankvm04/claude-awake/v1.3.0/claude-awake -o ~/bin/claude-awake && chmod +x ~/bin/claude-awake
+mkdir -p ~/bin && curl -fsSL https://raw.githubusercontent.com/frankvm04/claude-awake/v1.4.0/claude-awake -o ~/bin/claude-awake && chmod +x ~/bin/claude-awake
 ```
 
 ### Skip the password prompt (optional)
@@ -162,6 +162,7 @@ claude-awake diagnose        # details to paste into a bug report
 | `-H M`, `--heat-minutes M` | Heat guard: how long it must stay too hot before sleeping (default 2) |
 | `-L N`, `--low-power-at N` | With the lid closed on battery at N% or below, turn on Low Power Mode (default 35, `0` = off) |
 | `--log FILE` | Also append every event to FILE as plain text (even without `-v`) |
+| `-s`, `--simple` | Simple display: no banner or dashboard, just one status line |
 
 Start it in a Terminal window, then close the lid. It keeps running. You can also
 start it with the lid already closed on an external monitor (clamshell mode); the
@@ -180,7 +181,7 @@ At startup, a banner and a checklist of what's active:
 Then a dashboard, pinned at the bottom of the window and updated every second:
 
 ```
-╭─ claude-awake ─────────────────────────────────── 1.3.0 ─╮
+╭─ claude-awake ─────────────────────────────────── 1.4.0 ─╮
 │ ⠹ AWAKE  0h 42m 10s              lid closed · screen off │
 │                                                          │
 │ Battery   ▰▰▰▰▱▱▱▱▱▱▱▱  34% on battery  ▾ LPM            │
@@ -196,6 +197,12 @@ Then a dashboard, pinned at the bottom of the window and updated every second:
   counting down, it says so and shows how long until it sleeps the Mac.
 - In a window narrower than 64 columns, the dashboard becomes one status line.
   Resizing the window redraws it to fit.
+- Prefer something plainer? `claude-awake -s` (`--simple`) skips the banner and
+  the dashboard and shows just that one status line, at any window width:
+
+  ```
+   ⠦ 0h42m · 34% LPM · lid ▣ closed · heat nominal · claude ●
+  ```
 - When the output isn't a terminal (for example piped to another command), it
   prints plain lines with no colors or redraws.
 - Set `NO_COLOR=1` to turn colors off.
@@ -348,6 +355,24 @@ claude-awake relies on: the sleep and Low Power Mode settings, the lid sensor,
 thermal pressure, battery temperature, displays, and whether `setup-sudo` is in
 place. It only reads information, needs no password, and leaves out your
 username, computer name, and serial numbers. Look it over before posting.
+
+## Development
+
+Before pushing a change, run the checks. They need only bash, grep, and perl, so
+they run on a Mac or Linux:
+
+```bash
+scripts/check.sh
+```
+
+They check syntax, and catch things that work in a newer bash but break the
+stock macOS bash 3.2: a `$name` right before a non-ASCII character (write
+`${name}`), and newer bash features. For a release, pass the version, and they
+also check that the script, the changelog, and the README agree on it:
+
+```bash
+scripts/check.sh 1.4.0
+```
 
 ## Changes
 

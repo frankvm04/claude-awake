@@ -4,6 +4,8 @@ All notable changes to claude-awake. Versions follow [Semantic Versioning](https
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-11-10
+
 ### Changed
 
 - New look. At startup, a banner and a checklist of what's active; while
@@ -19,6 +21,10 @@ All notable changes to claude-awake. Versions follow [Semantic Versioning](https
 
 - `--log FILE`: append every event to FILE as plain, dated text while the
   dashboard stays on screen (with or without `-v`).
+- `-s` / `--simple`: a simple display with no banner or dashboard, just one
+  status line at any window width.
+- `scripts/check.sh`: pre-release checks (syntax, macOS bash 3.2 pitfalls, and
+  with a version number, that the script, changelog and README agree on it).
 
 ### Fixed
 
@@ -123,7 +129,8 @@ First release.
 - Optional `claude-awake setup-sudo` adds a sudoers rule for
   `pmset -a disablesleep 0|1` only, so no password prompt is needed.
 
-[Unreleased]: https://github.com/frankvm04/claude-awake/compare/v1.3.0...main
+[Unreleased]: https://github.com/frankvm04/claude-awake/compare/v1.4.0...main
+[1.4.0]: https://github.com/frankvm04/claude-awake/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/frankvm04/claude-awake/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/frankvm04/claude-awake/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/frankvm04/claude-awake/compare/v1.0.0...v1.1.0
