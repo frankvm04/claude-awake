@@ -12,7 +12,9 @@ All notable changes to claude-awake. Versions follow [Semantic Versioning](https
   Options `-T/--max-temp`, `-P/--max-pressure`, and `-H/--heat-minutes`. Works
   without a password on Apple Silicon and Intel Macs, with or without a battery.
 - `status`, the status line, and `-v` show battery temperature and thermal
-  pressure.
+  pressure. On a MacBook that doesn't report battery temperature (such as
+  macOS 27 on Apple Silicon), `status` and the startup message say the heat
+  guard is using thermal pressure only.
 
 ### Fixed
 

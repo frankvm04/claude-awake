@@ -185,7 +185,10 @@ It watches two readings. Neither needs a password, and both work on Apple
 Silicon and Intel Macs:
 
 - **Battery temperature** (MacBooks), from `ioreg -r -n AppleSmartBattery`. The
-  default limit is 45 °C. A desktop Mac has no battery and uses pressure only.
+  default limit is 45 °C. Not every Mac reports it: desktops have no battery,
+  and recent macOS versions (for example macOS 27 on Apple Silicon) no longer
+  publish it. Then the heat guard uses thermal pressure only, and `status` and
+  the startup message say so.
 - **Thermal pressure**, the level macOS itself uses to decide when to slow the
   processor: nominal, moderate, heavy, trapping, sleeping. It is read with
   `notifyutil -g com.apple.system.thermalpressurelevel`. The default limit is

@@ -269,7 +269,11 @@ cmd_status() {
   if [ "$ext" -gt 0 ]; then say "  External display: $ext connected (screens are left on)"
   else say "  External display: none"; fi
   read_battery_temp; read_pressure
-  say "  Temperature     : $(heat_summary)"
+  if [ -n "$BATT_PCT" ] && [ -z "$BATT_TEMP10" ]; then
+    say "  Temperature     : $(heat_summary) (this Mac doesn't report battery temperature)"
+  else
+    say "  Temperature     : $(heat_summary)"
+  fi
   if [ -n "$BATT_PCT" ]; then
     if [ "$ON_AC" = "1" ]; then say "  Power           : AC, battery ${BATT_PCT}%"
     else say "  Power           : battery ${BATT_PCT}%"; fi
@@ -465,7 +469,10 @@ cmd_start() {
   ok "Your Mac will stay awake with the lid closed. ${DIM}(Ctrl-C to stop)${RST}"
   [ "$VERBOSE" = "1" ] && say "  • Verbose: logging lid, screen, power, battery and Claude events"
   [ "$BATTERY_MIN" -gt 0 ] && say "  • Stops if on battery at ${BATTERY_MIN}% or below"
-  read_battery_temp; read_pressure
+  read_battery; read_battery_temp; read_pressure
+  if [ "$MAX_TEMP" -gt 0 ] && [ -n "$BATT_PCT" ] && [ -z "$BATT_TEMP10" ] && [ -n "$PRESSURE" ] && [ "$max_pressure_rank" -gt 0 ]; then
+    say "  • This Mac doesn't report battery temperature; the heat guard uses thermal pressure"
+  fi
   local heat_rules=""
   [ "$MAX_TEMP" -gt 0 ] && [ -n "$BATT_TEMP10" ] && heat_rules="battery ≥ ${MAX_TEMP} °C"
   [ "$max_pressure_rank" -gt 0 ] && [ -n "$PRESSURE" ] && heat_rules="${heat_rules:+$heat_rules or }thermal pressure ≥ ${MAX_PRESSURE}"
