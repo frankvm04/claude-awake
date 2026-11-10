@@ -22,7 +22,7 @@
 
 set -u
 
-VERSION="1.2.0"
+VERSION="1.3.0"
 PROG="$(basename "$0")"
 STATE_DIR="${HOME}/.claude-awake"
 ORIG_FILE="${STATE_DIR}/original-sleep-disabled"   # value to restore

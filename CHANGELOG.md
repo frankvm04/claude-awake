@@ -4,6 +4,8 @@ All notable changes to claude-awake. Versions follow [Semantic Versioning](https
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-10
+
 ### Added
 
 - `claude-awake diagnose`: prints what a bug report needs (versions, `status`,
@@ -98,7 +100,8 @@ First release.
 - Optional `claude-awake setup-sudo` adds a sudoers rule for
   `pmset -a disablesleep 0|1` only, so no password prompt is needed.
 
-[Unreleased]: https://github.com/frankvm04/claude-awake/compare/v1.2.0...main
+[Unreleased]: https://github.com/frankvm04/claude-awake/compare/v1.3.0...main
+[1.3.0]: https://github.com/frankvm04/claude-awake/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/frankvm04/claude-awake/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/frankvm04/claude-awake/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/frankvm04/claude-awake/releases/tag/v1.0.0
