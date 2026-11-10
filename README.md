@@ -4,6 +4,11 @@ A terminal tool for macOS that keeps your MacBook awake with the lid closed, so
 the Claude desktop app or Claude Code keeps working. When you stop it, the normal
 sleep setting comes back.
 
+<p align="center">
+  <img src="assets/demo.gif" width="752" alt="claude-awake -v in a terminal: a startup checklist, then a live dashboard while the lid closes, the Mac is unplugged, the battery drains until Low Power Mode turns on, heat rises and settles, the Mac is plugged back in, and the lid opens">
+</p>
+<p align="center"><sub>claude-awake 1.4.0 with <code>-v</code>, using simulated sensor readings. Sped up 2×.</sub></p>
+
 ## Why not just `caffeinate`?
 
 `caffeinate` blocks *idle* sleep only. Closing the lid still puts the Mac to sleep,
