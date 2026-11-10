@@ -45,11 +45,12 @@ MAX_TEMP=45           # sleep if battery stays at/above this °C (0 = off)
 MAX_PRESSURE=heavy    # sleep if thermal pressure stays at/above this (off = off)
 HEAT_MINUTES=2        # how long it must stay too hot before sleeping
 LOW_POWER_AT=35       # Low Power Mode on battery at/below this % with the lid closed (0 = off)
+LOG_FILE=""           # --log FILE: also append every event to FILE as plain text
 
 CAFF_PID=""
 CLEANED_UP=0
 
-if [ -t 1 ]; then
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
   B=$'\033[1m'; DIM=$'\033[2m'; RED=$'\033[31m'; GRN=$'\033[32m'; YLW=$'\033[33m'; RST=$'\033[0m'
 else
   B=""; DIM=""; RED=""; GRN=""; YLW=""; RST=""
@@ -87,6 +88,7 @@ ${B}Options for start${RST}
   -i, --interval S          Seconds between checks (default ${INTERVAL})
   -v, --verbose             Log events with timestamps (lid, screen, external
                             displays, power, battery, heat, Claude, sleep gaps)
+      --log FILE            Also append every event to FILE as plain text
 
 ${B}Heat guard${RST} (puts the Mac to sleep if it stays too hot)
   -T, --max-temp C          Battery temperature limit in °C (default ${MAX_TEMP}; 0 = off)
@@ -132,10 +134,14 @@ sleep_disabled() {
   [ "$v" = "1" ] && echo 1 || echo 0
 }
 
+# 0 while claude-awake runs: with the lid closed nobody can answer a password
+# prompt, and waiting on one would stall the heat guard. 1 at startup and exit.
+SUDO_PROMPT_OK=1
+
 set_sleep_disabled() {
-  # $1 = 0|1. Tries non-interactive sudo first, then interactive if a terminal exists.
+  # $1 = 0|1. Tries non-interactive sudo first, then interactive if allowed.
   if sudo -n "$PMSET" -a disablesleep "$1" >/dev/null 2>&1; then return 0; fi
-  if [ -t 0 ]; then sudo "$PMSET" -a disablesleep "$1"; return $?; fi
+  if [ -t 0 ] && [ "$SUDO_PROMPT_OK" = "1" ]; then sudo "$PMSET" -a disablesleep "$1"; return $?; fi
   return 1
 }
 
@@ -250,7 +256,7 @@ lpm_name() {
 set_lpm() {
   # $1 = setting, $2 = value. Battery profile only.
   if sudo -n "$PMSET" -b "$1" "$2" >/dev/null 2>&1; then return 0; fi
-  if [ -t 0 ]; then sudo "$PMSET" -b "$1" "$2" >/dev/null; return $?; fi
+  if [ -t 0 ] && [ "$SUDO_PROMPT_OK" = "1" ]; then sudo "$PMSET" -b "$1" "$2" >/dev/null; return $?; fi
   return 1
 }
 
@@ -496,6 +502,8 @@ cmd_remove_sudo() {
 cleanup() {
   [ "$CLEANED_UP" = "1" ] && return
   CLEANED_UP=1
+  ui_finish
+  SUDO_PROMPT_OK=1
   printf '\n'
   [ -n "$CAFF_PID" ] && kill "$CAFF_PID" 2>/dev/null
   if [ -f "$LPM_FILE" ]; then
@@ -518,22 +526,377 @@ cleanup() {
   fi
 }
 
-STATUS_LINE=""
+# ---------------------------------------------------------------- terminal UI
+# Three modes, chosen when claude-awake starts (ui_init):
+#   panel  a terminal at least 64 columns wide: a dashboard pinned at the bottom
+#          of the window, redrawn in place
+#   line   a narrower terminal: one status line, redrawn in place
+#   plain  output isn't a terminal (piped, e.g. to tee): no redraws, plain lines
+# The event log (-v) scrolls above the panel or line. NO_COLOR turns colors off.
+# Drawing uses only bash built-ins (no subshells or helper programs per frame).
 
-draw_status() {
-  [ -n "$STATUS_LINE" ] && printf '\r\033[K%s' "$STATUS_LINE"
+UI_MODE=plain; UI_COLOR=0; UI_COLS=80; UI_H=0; UI_RESIZED=0; UI_FIRST=1; UI_LIVE=0
+UI_W=()                                   # widths of the live lines now on screen
+UI_LC=(); UI_LW=()                        # lines being built: colored text, width
+HEAT_HIST=( · · · · · · · · · · · · )     # last 12 heat samples (one per 10 s)
+UI_DASH="────────────────────────────────────────────────────────────────────────────────"
+UI_SPIN=( ⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏ )
+UI_GAUGE_ON="▰▰▰▰▰▰▰▰▰▰▰▰"; UI_GAUGE_OFF="▱▱▱▱▱▱▱▱▱▱▱▱"
+UI_LIMITS=""
+CK_STATE=(); CK_TEXT=()                   # startup checklist: ok|off|warn, text
+
+ui_init() {
+  # Character counts (for padding) need a UTF-8 locale.
+  case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in
+    *UTF-8*|*utf-8*|*UTF8*|*utf8*) ;;
+    *) # pick a UTF-8 locale that is actually installed (macOS has en_US.UTF-8)
+       local l
+       l="$(locale -a 2>/dev/null | grep -i -m1 -E '^(en_US\.utf-?8|c\.utf-?8|utf-?8)$')"
+       if [ -n "$l" ]; then
+         if [ -n "${LC_ALL:-}" ]; then LC_ALL="$l"; else LC_CTYPE="$l"; fi
+       fi ;;
+  esac
+  if [ -t 1 ] && [ "${TERM:-dumb}" != "dumb" ]; then
+    UI_MODE=line
+    [ -z "${NO_COLOR:-}" ] && UI_COLOR=1
+    ui_size
+    [ "$UI_COLS" -ge 64 ] && UI_MODE=panel
+  fi
+  local e=$'\033'
+  if [ "$UI_COLOR" = "1" ]; then
+    C_R="$e[0m"; C_B="$e[1m"; C_TXT="$e[39m$e[1m"
+    C_VIO="$e[38;5;141m"; C_VIO2="$e[38;5;99m"; C_AMB="$e[38;5;214m"; C_GRN="$e[38;5;78m"
+    C_RED="$e[38;5;203m"; C_CYN="$e[38;5;37m"; C_GRY="$e[38;5;245m"; C_GRY2="$e[38;5;243m"
+    C_YLW="$e[38;5;178m"
+  else
+    C_R=""; C_B=""; C_TXT=""; C_VIO=""; C_VIO2=""; C_AMB=""; C_GRN=""; C_RED=""
+    C_CYN=""; C_GRY=""; C_GRY2=""; C_YLW=""
+  fi
+}
+
+ui_size() {
+  local c
+  c="$(stty size </dev/tty 2>/dev/null)"; c="${c##* }"
+  case "$c" in ''|*[!0-9]*|0) c="$(tput cols 2>/dev/null)" ;; esac
+  case "$c" in ''|*[!0-9]*|0) c=80 ;; esac
+  UI_COLS=$c
+}
+
+# Line building: ui_put appends text to the plain copy (for measuring) and the
+# colored copy (for printing); ui_emit stores the finished line.
+ui_reset() { UI_P=""; UI_C=""; }
+ui_put() { UI_P="$UI_P$2"; if [ -n "$1" ]; then UI_C="$UI_C$1$2$C_R"; else UI_C="$UI_C$2"; fi; }
+ui_padto() {
+  local k=$(( $1 - ${#UI_P} ))
+  [ "$k" -gt 0 ] || return 0
+  printf -v UI_SP '%*s' "$k" ''; UI_P="$UI_P$UI_SP"; UI_C="$UI_C$UI_SP"
+}
+ui_emit() { UI_LC[${#UI_LC[@]}]="$UI_C"; UI_LW[${#UI_LW[@]}]=${#UI_P}; ui_reset; }
+
+ui_dur()   { printf -v UI_S '%dh %02dm %02ds' $(($1 / 3600)) $((($1 / 60) % 60)) $(($1 % 60)); }
+ui_short() { printf -v UI_S '%dh%02dm' $(($1 / 3600)) $((($1 / 60) % 60)); }
+ui_temp()  { printf -v UI_S '%d.%d °C' $(($1 / 10)) $(($1 % 10)); }
+
+# The panel and line read the run state from cmd_start's variables (bash
+# functions see their caller's locals); every read has a default so a redraw
+# is safe at any point in the loop.
+ui_state() {
+  S_ELAPSED=${elapsed:-0}; S_LID=${lid_was_closed:-0}; S_EXT=${ext:-0}
+  S_LPM=${lpm_on:-0}; S_CLAUDE=${is_running:-}; S_HOT=${hot_since:-}
+  S_GRACE=${heat_grace:-120}; S_NOW=${now:-$SECONDS}
+  S_PCT=${BATT_PCT:-}; S_AC=${ON_AC:-1}; S_PR=${PRESSURE:-}; S_PRN=${PRESSURE_NAME:-unknown}
+  S_T10=${BATT_TEMP10:-}
+}
+
+heat_bar() {
+  # Sets HB: one bar for the heat history. Battery temperature when known
+  # (25-46 °C maps onto 8 heights), otherwise the pressure level; "·" if neither.
+  local lev=-1 bars="▁▂▃▄▅▆▇█"
+  if [ -n "${BATT_TEMP10:-}" ]; then
+    lev=$(( (BATT_TEMP10 - 250) / 30 )); [ "$lev" -lt 0 ] && lev=0; [ "$lev" -gt 7 ] && lev=7
+  elif [ -n "${PRESSURE:-}" ]; then
+    case "$PRESSURE" in 0) lev=0 ;; 1) lev=2 ;; 2) lev=4 ;; 3) lev=6 ;; *) lev=7 ;; esac
+  fi
+  if [ "$lev" -ge 0 ]; then HB="${bars:$lev:1}"; else HB="·"; fi
+}
+
+ui_heat_color() {
+  if [ -n "$S_HOT" ]; then UI_HC="$C_RED"
+  elif [ -z "$S_PR" ] || [ "$S_PR" -eq 0 ]; then UI_HC="$C_GRN"
+  elif [ "$S_PR" -eq 1 ]; then UI_HC="$C_AMB"
+  else UI_HC="$C_RED"; fi
+}
+
+ui_build_panel() {
+  local W=58 CW=56 left_p left_c k on col spark
+  ui_state; ui_heat_color
+  UI_LC=(); UI_LW=(); ui_reset
+
+  # ╭─ claude-awake ─────── 1.3.0 ─╮
+  ui_put "$C_VIO2" "╭─ "; ui_put "$C_TXT" "claude-awake"; ui_put "$C_VIO2" " "
+  k=$(( W + 2 - ${#UI_P} - ${#VERSION} - 4 ))
+  ui_put "$C_VIO2" "${UI_DASH:0:$k} $VERSION ─╮"; ui_emit
+
+  # │ ⠹ AWAKE  1h 23m 07s            lid closed · screen off │
+  ui_put "$C_VIO2" "│ "
+  ui_put "$C_VIO" "${UI_SPIN[$((SECONDS % 10))]}"; ui_put "" " "
+  if [ -n "$S_HOT" ]; then ui_put "$C_B$C_RED" "HOT"; else ui_put "$C_B" "AWAKE"; fi
+  ui_dur "$S_ELAPSED"; ui_put "" "  "; ui_put "$C_TXT" "$UI_S"
+  left_p="$UI_P"; left_c="$UI_C"; ui_reset
+  ui_put "$C_GRY" "lid "
+  if [ "$S_LID" = "1" ]; then
+    ui_put "" "closed"
+    if [ "$S_EXT" -gt 0 ]; then ui_put "$C_GRY" " · external display on"; else ui_put "$C_GRY" " · screen off"; fi
+  else
+    ui_put "" "open"
+  fi
+  k=$(( CW + 2 - ${#left_p} - ${#UI_P} ))
+  [ "$k" -lt 1 ] && k=1
+  printf -v UI_SP '%*s' "$k" ''
+  UI_P="$left_p$UI_SP$UI_P"; UI_C="$left_c$UI_SP$UI_C"
+  ui_put "$C_VIO2" " │"; ui_emit
+
+  ui_put "$C_VIO2" "│"; ui_padto $((W + 1)); ui_put "$C_VIO2" "│"; ui_emit
+
+  # Battery  ▰▰▰▰▱▱▱▱▱▱▱▱  34% on battery  ▾ LPM
+  ui_put "$C_VIO2" "│ "; ui_put "$C_GRY" "Battery   "
+  if [ -n "$S_PCT" ]; then
+    on=$(( (S_PCT * 12 + 50) / 100 ))
+    if [ "$S_AC" = "1" ]; then col="$C_GRN"
+    elif [ "$S_PCT" -le $((BATTERY_MIN + 5)) ]; then col="$C_RED"
+    elif [ "$S_PCT" -le 35 ] || { [ "$LOW_POWER_AT" -gt 0 ] && [ "$S_PCT" -le "$LOW_POWER_AT" ]; }; then col="$C_AMB"
+    else col="$C_TXT"; fi
+    ui_put "$col" "${UI_GAUGE_ON:0:$on}"; ui_put "$C_GRY2" "${UI_GAUGE_OFF:0:$((12 - on))}"
+    ui_put "" "  "; ui_put "$col" "${S_PCT}%"
+    if [ "$S_AC" = "1" ]; then ui_put "$C_GRY" " plugged in"; else ui_put "$C_GRY" " on battery"; fi
+    [ "$S_LPM" = "1" ] && ui_put "$C_YLW" "  ▾ LPM"
+  else
+    ui_put "$C_GRY" "unknown"
+  fi
+  ui_padto $((W + 1)); ui_put "$C_VIO2" "│"; ui_emit
+
+  # Heat     ▁▁▂▂▃▂▂▁▁▁▂▁  nominal · 34.2 °C
+  ui_put "$C_VIO2" "│ "; ui_put "$C_GRY" "Heat      "
+  printf -v spark '%s' "${HEAT_HIST[@]}"
+  ui_put "$UI_HC" "$spark"; ui_put "" "  "
+  if [ -n "$S_HOT" ]; then
+    k=$(( S_GRACE - (S_NOW - S_HOT) )); [ "$k" -lt 0 ] && k=0
+    ui_put "$C_B$C_RED" "too hot"; ui_put "$C_GRY" " · sleeping in $((k / 60))m$((k % 60))s"
+  elif [ -n "$S_PR" ]; then
+    ui_put "$UI_HC" "$S_PRN"
+    [ -n "$S_T10" ] && { ui_temp "$S_T10"; ui_put "$C_GRY" " · $UI_S"; }
+  elif [ -n "$S_T10" ]; then
+    ui_temp "$S_T10"; ui_put "$UI_HC" "$UI_S"
+  else
+    ui_put "$C_GRY" "unavailable"
+  fi
+  ui_padto $((W + 1)); ui_put "$C_VIO2" "│"; ui_emit
+
+  # Claude   ● running
+  ui_put "$C_VIO2" "│ "; ui_put "$C_GRY" "Claude    "
+  if [ "$S_CLAUDE" = "1" ]; then ui_put "$C_GRN" "●"; ui_put "" " running"
+  elif [ "$S_CLAUDE" = "0" ]; then ui_put "$C_GRY2" "○"; ui_put "" " not running"
+  else ui_put "$C_GRY2" "…"; fi
+  [ "$UNTIL_CLAUDE_EXITS" = "1" ] && ui_put "$C_GRY" " · stops when it quits"
+  ui_padto $((W + 1)); ui_put "$C_VIO2" "│"; ui_emit
+
+  # Display  ○ built-in only
+  ui_put "$C_VIO2" "│ "; ui_put "$C_GRY" "Display   "
+  if [ "$S_EXT" -gt 0 ]; then
+    ui_put "$C_CYN" "●"; ui_put "" " external display"; [ "$S_EXT" -gt 1 ] && ui_put "" " ×$S_EXT"
+    ui_put "$C_GRY" " · screens left on"
+  else
+    ui_put "$C_GRY2" "○"; ui_put "" " built-in only"
+  fi
+  ui_padto $((W + 1)); ui_put "$C_VIO2" "│"; ui_emit
+
+  # limits, dimmed
+  ui_put "$C_VIO2" "│ "; ui_put "$C_GRY" "$UI_LIMITS"
+  ui_padto $((W + 1)); ui_put "$C_VIO2" "│"; ui_emit
+
+  ui_put "$C_VIO2" "╰${UI_DASH:0:$W}╯"; ui_emit
+}
+
+ui_build_line() {
+  # One status line from parts; parts are dropped from the end until it fits,
+  # because a wrapped line would break the in-place redraw.
+  local pp=() pc=() n i
+  ui_state; ui_heat_color
+  ui_reset; ui_put "$C_VIO" "${UI_SPIN[$((SECONDS % 10))]}"; ui_put "" " "; ui_short "$S_ELAPSED"; ui_put "$C_TXT" "$UI_S"
+  pp[0]="$UI_P"; pc[0]="$UI_C"; ui_reset
+  if [ -n "$S_PCT" ]; then
+    if [ "$S_AC" = "1" ]; then ui_put "$C_GRN" "${S_PCT}%"; else ui_put "$C_AMB" "${S_PCT}%"; fi
+    [ "$S_LPM" = "1" ] && ui_put "$C_YLW" " LPM"
+  else ui_put "$C_GRY" "?%"; fi
+  pp[1]="$UI_P"; pc[1]="$UI_C"; ui_reset
+  ui_put "" "lid "; if [ "$S_LID" = "1" ]; then ui_put "$C_CYN" "▣"; ui_put "" " closed"; else ui_put "$C_GRY2" "□"; ui_put "" " open"; fi
+  pp[2]="$UI_P"; pc[2]="$UI_C"; ui_reset
+  if [ -n "$S_HOT" ]; then ui_put "$C_B$C_RED" "too hot"; else ui_put "" "heat "; ui_put "$UI_HC" "$S_PRN"; fi
+  pp[3]="$UI_P"; pc[3]="$UI_C"; ui_reset
+  ui_put "" "claude "; if [ "$S_CLAUDE" = "1" ]; then ui_put "$C_GRN" "●"; else ui_put "$C_GRY2" "○"; fi
+  pp[4]="$UI_P"; pc[4]="$UI_C"; ui_reset
+  n=5
+  while :; do
+    UI_P=" ${pp[0]}"; UI_C=" ${pc[0]}"
+    for ((i = 1; i < n; i++)); do UI_P="$UI_P · ${pp[$i]}"; UI_C="$UI_C ${C_GRY2}·${C_R} ${pc[$i]}"; done
+    [ "${#UI_P}" -lt "$UI_COLS" ] || [ "$n" -le 1 ] && break
+    n=$((n - 1))
+  done
+  UI_LC=(); UI_LW=(); ui_emit
+}
+
+ui_resized() {
+  # The window changed size. Terminal.app and iTerm2 re-wrap existing lines, so
+  # work out how many rows the old live lines take now, erase them, start over.
+  UI_RESIZED=0
+  local rows=0 w i
+  ui_size
+  for ((i = 0; i < ${#UI_W[@]}; i++)); do
+    w=${UI_W[$i]}
+    if [ "$w" -le 0 ]; then rows=$((rows + 1)); else rows=$(( rows + (w + UI_COLS - 1) / UI_COLS )); fi
+  done
+  [ "$rows" -gt 0 ] && printf '\033[%dA\r\033[J' "$rows"
+  UI_H=0; UI_W=()
+  if [ "$UI_COLS" -ge 64 ]; then UI_MODE=panel; else UI_MODE=line; fi
+}
+
+ui_draw() {
+  [ "$UI_LIVE" = "1" ] || return 0
+  [ "$UI_RESIZED" = "1" ] && ui_resized
+  if [ "$UI_MODE" = "panel" ]; then ui_build_panel; else ui_build_line; fi
+  local out="" i
+  [ "$UI_H" -gt 0 ] && out=$'\033'"[${UI_H}A"$'\r'
+  for ((i = 0; i < ${#UI_LC[@]}; i++)); do out="$out${UI_LC[$i]}"$'\033[K\n'; done
+  printf '%s' "$out"
+  UI_H=${#UI_LC[@]}; UI_W=( "${UI_LW[@]}" )
+}
+
+ui_clear() {
+  # Erase the live lines (the cursor sits just below them).
+  [ "$UI_RESIZED" = "1" ] && { ui_resized; return 0; }
+  [ "$UI_H" -gt 0 ] && printf '\033[%dA\r\033[J' "$UI_H"
+  UI_H=0
+}
+
+ui_start() {
+  # Begin the live view: hide the cursor and draw.
+  [ "$UI_MODE" = "plain" ] && return 0
+  UI_LIVE=1
+  printf '\033[?25l'
+  trap 'UI_RESIZED=1' WINCH
+  ui_draw
+}
+
+ui_finish() {
+  # Leave the last view on screen, give the cursor back, stop redrawing.
+  [ "$UI_LIVE" = "1" ] || return 0
+  UI_LIVE=0; UI_H=0
+  printf '\033[?25h'
 }
 
 event() {
-  # Verbose mode only: print a timestamped line above the live status line.
+  # Log an event: to --log FILE (always), and on screen above the live view (-v).
+  #   event <kind> <text> [detail]
+  local kind="$1" text="$2" detail="${3:-}" sym col t conn line room
+  if [ -n "$LOG_FILE" ]; then
+    { printf '%s  %s%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$text" "${detail:+ — $detail}" >>"$LOG_FILE"; } 2>/dev/null
+  fi
   [ "$VERBOSE" = "1" ] || return 0
-  printf '\r\033[K%s%s%s  %s\n' "$DIM" "$(date '+%H:%M:%S')" "$RST" "$*"
-  draw_status
+  case "$kind" in
+    start|claude) sym="◆"; col="$C_VIO" ;;
+    lid-closed)   sym="▣"; col="$C_CYN" ;;
+    lid-open)     sym="□"; col="$C_CYN" ;;
+    display)      sym="◇"; col="$C_CYN" ;;
+    power-ac)     sym="↯"; col="$C_GRN" ;;
+    power-batt)   sym="↯"; col="$C_AMB" ;;
+    battery)      sym="▪"; col="$C_AMB" ;;
+    lpm)          sym="▾"; col="$C_YLW" ;;
+    heat-ok)      sym="≈"; col="$C_GRN" ;;
+    heat-warm)    sym="≈"; col="$C_AMB" ;;
+    heat-hot)     sym="≈"; col="$C_RED" ;;
+    stop)         sym="■"; col="$C_AMB" ;;
+    error)        sym="✗"; col="$C_RED" ;;
+    *)            sym="!"; col="$C_AMB" ;;
+  esac
+  t="$(date '+%H:%M:%S')"
+  if [ "$UI_LIVE" != "1" ]; then
+    printf '%s  %s %s%s\n' "$t" "$sym" "$text" "${detail:+ — $detail}"
+    return 0
+  fi
+  conn="├"; [ "$UI_FIRST" = "1" ] && { conn="┬"; UI_FIRST=0; }
+  ui_clear
+  # "  hh:mm:ss ├ x " is 15 columns: drop the detail, then shorten, to fit.
+  room=$(( UI_COLS - 16 )); line="$text${detail:+ — $detail}"
+  if [ "${#line}" -gt "$room" ]; then
+    detail=""
+    [ "${#text}" -gt "$room" ] && text="${text:0:$((room - 1))}…"
+  fi
+  printf '  %s%s %s%s %s%s%s %s%s%s%s\n' "$C_GRY2" "$t" "$conn" "$C_R" "$col" "$sym" "$C_R" \
+    "$text" "${detail:+ $C_GRY— }" "$detail" "${detail:+$C_R}"
+  ui_draw
 }
+
+ui_splash() {
+  # Startup: banner, what's active (CK_STATE / CK_TEXT), and a short footer.
+  local i n=${#CK_TEXT[@]} mark two=0 half
+  if [ "$UI_MODE" = "plain" ]; then
+    say "claude-awake $VERSION: keeping this MacBook awake with the lid closed."
+  elif [ "$UI_COLS" -lt 58 ]; then
+    printf '\n  %s%sclaude-awake%s %s%s%s\n' "$C_B" "$C_VIO" "$C_R" "$C_GRY2" "$VERSION" "$C_R"
+  else
+    local top=( "█▀▀" "█  " "▄▀█" "█ █" "█▀▄" "█▀▀" "▄▄▄" "▄▀█" "█ █ █" "▄▀█" "█▄▀" "█▀▀" )
+    local bot=( "█▄▄" "█▄▄" "█▀█" "█▄█" "█▄▀" "██▄" "   " "█▀█" "▀▄▀▄▀" "█▀█" "█ █" "██▄" )
+    local cols=( 99 99 135 135 141 177 213 213 209 214 214 221 ) l1="  " l2="  "
+    for ((i = 0; i < 12; i++)); do
+      if [ "$UI_COLOR" = "1" ]; then
+        l1="$l1"$'\033'"[38;5;${cols[$i]}m${top[$i]} "; l2="$l2"$'\033'"[38;5;${cols[$i]}m${bot[$i]} "
+      else
+        l1="$l1${top[$i]} "; l2="$l2${bot[$i]} "
+      fi
+    done
+    printf '\n%s%s\n%s%s\n' "$l1" "$C_R" "$l2" "$C_R"
+    if [ "$UI_COLS" -ge 64 ]; then
+      printf '  %skeep your MacBook and Claude running with the lid closed%s  %s%s%s\n' "$C_GRY" "$C_R" "$C_GRY2" "$VERSION" "$C_R"
+    else
+      printf '  %skeep your MacBook and Claude running%s %s%s%s\n' "$C_GRY" "$C_R" "$C_GRY2" "$VERSION" "$C_R"
+    fi
+  fi
+  printf '\n'
+  [ "$UI_MODE" = "panel" ] && [ "$UI_COLS" -ge 78 ] && two=1
+  half=$(( (n + 1) / 2 ))
+  for ((i = 0; i < n; i++)); do
+    [ "$two" = "1" ] && [ "$i" -ge "$half" ] && break
+    ui_ckline "$i"; ui_reset
+    if [ "$two" = "1" ] && [ $((i + half)) -lt "$n" ]; then
+      UI_P="$UI_CK_P"; UI_C="$UI_CK_C"; ui_padto 40
+      local p1="$UI_P" c1="$UI_C"
+      ui_ckline $((i + half)); printf '%s%s\n' "$c1" "$UI_CK_C"
+    else
+      printf '%s\n' "$UI_CK_C"
+    fi
+  done
+  printf '\n  %sCtrl-C stops it and restores your settings.%s' "$C_GRY" "$C_R"
+  [ "$VERBOSE" = "1" ] || printf ' %s-v shows an event log.%s' "$C_GRY" "$C_R"
+  printf '\n  %sKeep the MacBook on a hard surface, not in a bag.%s\n\n' "$C_GRY" "$C_R"
+}
+
+ui_ckline() {  # one checklist item -> UI_CK_P / UI_CK_C
+  ui_reset; ui_put "" "  "
+  case "${CK_STATE[$1]}" in
+    ok)   ui_put "$C_GRN" "✓" ;;
+    warn) ui_put "$C_AMB" "!" ;;
+    *)    ui_put "$C_GRY2" "○" ;;
+  esac
+  if [ "${CK_STATE[$1]}" = "off" ]; then ui_put "$C_GRY" " ${CK_TEXT[$1]}"; else ui_put "" " ${CK_TEXT[$1]}"; fi
+  UI_CK_P="$UI_P"; UI_CK_C="$UI_C"
+}
+
+ck() { CK_STATE[${#CK_STATE[@]}]="$1"; CK_TEXT[${#CK_TEXT[@]}]="$2"; }
 
 stop_with() {
   # $1 = reason. Shown in terminal and as a notification.
-  event "Stopping: $1"
+  event stop "Stopping" "$1"
+  ui_finish
   printf '\n'
   info "$1"
   notify "$1 — normal sleep restored."
@@ -543,7 +906,8 @@ stop_with() {
 heat_sleep() {
   # $1 = what was too hot, $2 = for how long (optional). Put the Mac to sleep now.
   local msg="Too hot${2:+ for $2}: $1"
-  event "${RED}${msg} — putting the Mac to sleep${RST}"
+  event heat-hot "$msg" "putting the Mac to sleep"
+  ui_finish
   printf '\n'
   warn "${msg}. Putting the Mac to sleep."
   notify "${msg}. Putting the Mac to sleep."
@@ -572,6 +936,7 @@ cmd_start() {
       -t|--hours)              shift; MAX_HOURS="${1:-}" ;;
       -i|--interval)           shift; INTERVAL="${1:-}" ;;
       -v|--verbose)            VERBOSE=1 ;;
+      --log)                   shift; LOG_FILE="${1:-}"; [ -n "$LOG_FILE" ] || die "--log needs a file name." ;;
       -T|--max-temp)           shift; MAX_TEMP="${1:-}" ;;
       -P|--max-pressure)       shift; MAX_PRESSURE="${1:-}" ;;
       -H|--heat-minutes)       shift; HEAT_MINUTES="${1:-}" ;;
@@ -602,6 +967,10 @@ cmd_start() {
   local pid
   if pid="$(other_instance_pid)"; then
     die "already running (pid $pid). Use '$PROG status' or '$PROG stop'."
+  fi
+  ui_init
+  if [ -n "$LOG_FILE" ]; then
+    { : >>"$LOG_FILE"; } 2>/dev/null || die "can't write to the log file: $LOG_FILE"
   fi
 
   mkdir -p "$STATE_DIR"
@@ -640,64 +1009,88 @@ cmd_start() {
 
   local seen_claude=0
   if [ "$UNTIL_CLAUDE_EXITS" = "1" ]; then
-    if claude_running; then seen_claude=1
-    else warn "Claude isn't running yet. I'll stop once it has started and then quit."; fi
+    claude_running && seen_claude=1
   fi
 
-  ok "Your Mac will stay awake with the lid closed. ${DIM}(Ctrl-C to stop)${RST}"
-  [ "$VERBOSE" = "1" ] && say "  • Verbose: logging lid, screen, power, battery and Claude events"
-  [ "$BATTERY_MIN" -gt 0 ] && say "  • Stops if on battery at ${BATTERY_MIN}% or below"
   read_battery; read_battery_temp; read_pressure
   # Low Power Mode needs a battery and a pmset setting for it.
   local LPM_KEY=""
-  if [ "$LOW_POWER_AT" -gt 0 ] && [ -n "$BATT_PCT" ]; then
-    LPM_KEY="$(lpm_key)"
-    if [ -n "$LPM_KEY" ]; then
-      say "  • Turns on Low Power Mode with the lid closed on battery at ${LOW_POWER_AT}% or below"
-    else
-      warn "Low Power Mode can't be changed on this Mac (no pmset setting for it)."
-    fi
+  if [ "$LOW_POWER_AT" -gt 0 ] && [ -n "$BATT_PCT" ]; then LPM_KEY="$(lpm_key)"; fi
+
+  # What's active, for the startup checklist and the panel's limits line.
+  local heat_rule="" limits=""
+  if [ "$MAX_TEMP" -gt 0 ] && [ -n "$BATT_TEMP10" ]; then heat_rule="${MAX_TEMP} °C"; fi
+  if [ "$max_pressure_rank" -gt 0 ] && [ -n "$PRESSURE" ]; then
+    if [ -n "$heat_rule" ]; then heat_rule="$heat_rule or $MAX_PRESSURE"; else heat_rule="pressure ≥ $MAX_PRESSURE"; fi
   fi
-  if [ "$MAX_TEMP" -gt 0 ] && [ -n "$BATT_PCT" ] && [ -z "$BATT_TEMP10" ] && [ -n "$PRESSURE" ] && [ "$max_pressure_rank" -gt 0 ]; then
-    say "  • This Mac doesn't report battery temperature; the heat guard uses thermal pressure"
-  fi
-  local heat_rules=""
-  [ "$MAX_TEMP" -gt 0 ] && [ -n "$BATT_TEMP10" ] && heat_rules="battery ≥ ${MAX_TEMP} °C"
-  [ "$max_pressure_rank" -gt 0 ] && [ -n "$PRESSURE" ] && heat_rules="${heat_rules:+$heat_rules or }thermal pressure ≥ ${MAX_PRESSURE}"
-  if [ -n "$heat_rules" ]; then
-    say "  • Sleeps the Mac if ${heat_rules} for ${HEAT_MINUTES} min (now: $(heat_summary))"
+  ck ok "lid-close sleep disabled"
+  ck ok "screen off under the lid"
+  if [ -n "$heat_rule" ]; then
+    ck ok "heat guard: $heat_rule, $HEAT_MINUTES min"; limits="heat: ${heat_rule#pressure ≥ } ${HEAT_MINUTES}m"
   elif [ "$MAX_TEMP" -gt 0 ] || [ "$max_pressure_rank" -gt 0 ]; then
-    warn "Can't read any temperature on this Mac, so the heat guard is off."
+    ck warn "heat guard off (no reading)"
+  else
+    ck off "heat guard (off)"
   fi
-  [ "$max_secs" -gt 0 ]    && say "  • Stops after ${MAX_HOURS} hour(s)"
-  [ "$UNTIL_CLAUDE_EXITS" = "1" ] && say "  • Stops when Claude quits"
-  say "  ${DIM}Keep it on a hard surface; don't put it in a bag while running.${RST}"
-  say ""
+  if [ -n "$LPM_KEY" ]; then
+    ck ok "Low Power Mode at ${LOW_POWER_AT}%"; limits="${limits:+$limits · }LPM ${LOW_POWER_AT}%"
+  elif [ "$LOW_POWER_AT" -gt 0 ]; then
+    ck off "Low Power Mode (not available)"
+  else
+    ck off "Low Power Mode (off)"
+  fi
+  if [ "$BATTERY_MIN" -gt 0 ]; then
+    ck ok "stop on battery at ${BATTERY_MIN}%"; limits="stop ${BATTERY_MIN}%${limits:+ · $limits}"
+  else
+    ck off "battery stop (off)"
+  fi
+  if [ "$max_secs" -gt 0 ]; then
+    ck ok "stop after ${MAX_HOURS} h"; limits="${limits:+$limits · }limit ${MAX_HOURS}h"
+  else
+    ck off "time limit (none)"
+  fi
+  [ "$UNTIL_CLAUDE_EXITS" = "1" ] && ck ok "stop when Claude quits"
+  [ "${#limits}" -gt 56 ] && limits="${limits:0:55}…"
+  UI_LIMITS="$limits"
 
-  event "Lid-close sleep disabled (was SleepDisabled=$(cat "$ORIG_FILE" 2>/dev/null || echo 0))"
+  ui_splash
+  if [ "$MAX_TEMP" -gt 0 ] || [ "$max_pressure_rank" -gt 0 ]; then
+    [ -z "$heat_rule" ] && warn "Can't read any temperature on this Mac, so the heat guard is off."
+  fi
+  if [ "$LOW_POWER_AT" -gt 0 ] && [ -n "$BATT_PCT" ] && [ -z "$LPM_KEY" ]; then
+    warn "Low Power Mode can't be changed on this Mac (no pmset setting for it)."
+  fi
+  [ "$UNTIL_CLAUDE_EXITS" = "1" ] && [ "$seen_claude" = "0" ] && warn "Claude isn't running yet. I'll stop once it has started and then quit."
 
-  # Two cadences: the lid is checked every LID_TICK seconds (cheap) so the screen
-  # goes dark within ~2 s of closing; everything else runs every INTERVAL seconds.
+  # Cadences: every TICK (1 s) the lid is checked and the view redrawn, so the
+  # screen goes dark within a second or two of closing; everything else runs
+  # every INTERVAL seconds.
   # External displays are checked every DISPLAY_CHECK s (system_profiler is slow),
   # and immediately when the lid closes.
-  local LID_TICK=2 SCREEN_REPEAT=30 GAP_WARN=20 DISPLAY_CHECK=10
-  local start=$SECONDS now prev_tick=$SECONDS elapsed gap
-  local claude_str="…" power_str="…" lid_str
+  local TICK=1 SCREEN_REPEAT=30 GAP_WARN=20 DISPLAY_CHECK=10
+  local start=$SECONDS now=$SECONDS prev_tick=$SECONDS elapsed=0 gap
   local next_check=0 lid_was_closed=-1 lid_closed_at=0 last_screen_off=-999
   local prev_on_ac="" prev_batt_step="" prev_claude="" sudo_warned=0 is_running
   local ext=0 prev_ext="" next_display_check=0
   # Heat guard: checked every HEAT_CHECK s; must stay too hot for heat_grace s.
-  local HEAT_CHECK=10 next_heat_check=0 hot_since="" hot_reason prev_pressure="" heat_str=""
+  local HEAT_CHECK=10 next_heat_check=0 hot_since="" hot_reason prev_pressure=""
   # Low Power Mode: lpm_on = we're in the low-power state (set by us, or it was
   # already on); lpm_failed stops retrying until the conditions change.
   local lpm_on=0 lpm_failed=0 lpm_notified=0 lpm_want lpm_cur lpm_why
+  local is_running=""
+
+  heat_bar; HEAT_HIST=( "$HB" "$HB" "$HB" "$HB" "$HB" "$HB" "$HB" "$HB" "$HB" "$HB" "$HB" "$HB" )
+  SUDO_PROMPT_OK=0
+  ui_start
+  event start "claude-awake started" "lid-close sleep disabled (was SleepDisabled=$(cat "$ORIG_FILE" 2>/dev/null || echo 0))"
   while :; do
     now=$SECONDS
+    elapsed=$((now - start))
 
-    # A tick far longer than LID_TICK means the process was frozen: the Mac slept.
+    # A tick far longer than TICK means the process was frozen: the Mac slept.
     gap=$((now - prev_tick))
-    if [ "$gap" -gt $((LID_TICK + GAP_WARN)) ]; then
-      event "${YLW}No activity for $(fmt_duration "$gap") — the Mac appears to have slept${RST}"
+    if [ "$gap" -gt $((TICK + GAP_WARN)) ]; then
+      event warn "No activity for $(fmt_duration "$gap")" "the Mac appears to have slept"
     fi
     prev_tick=$now
 
@@ -706,9 +1099,9 @@ cmd_start() {
       ext="$(external_display_count)"
       if [ "$ext" != "$prev_ext" ]; then
         if [ "$ext" -gt 0 ]; then
-          event "External display connected ($ext) — screens will be left on"
+          event display "External display connected ($ext)" "screens left on"
         elif [ -n "$prev_ext" ]; then
-          event "External display disconnected"
+          event display "External display disconnected"
           last_screen_off=-999   # lid closed? turn the built-in panel off on this tick
         fi
         prev_ext=$ext
@@ -722,10 +1115,10 @@ cmd_start() {
         ext="$(external_display_count)"; prev_ext=$ext
         next_display_check=$((now + DISPLAY_CHECK))
         if [ "$ext" -gt 0 ]; then
-          event "Lid closed — external display in use, leaving it on"
+          event lid-closed "Lid closed" "external display in use, leaving it on"
         else
           screen_off; last_screen_off=$now
-          event "Lid closed — screen turned off"
+          event lid-closed "Lid closed" "screen turned off"
         fi
       elif [ "$ext" -eq 0 ] && [ $((now - last_screen_off)) -ge "$SCREEN_REPEAT" ]; then
         # Repeat every SCREEN_REPEAT s in case something (a notification, a USB
@@ -733,16 +1126,13 @@ cmd_start() {
         screen_off; last_screen_off=$now
       fi
       lid_was_closed=1
-      if [ "$ext" -gt 0 ]; then lid_str="closed, external display on"
-      else lid_str="closed, screen off"; fi
     else
       if [ "$lid_was_closed" = "1" ]; then
-        event "Lid opened (was closed $(fmt_duration $((now - lid_closed_at))))"
+        event lid-open "Lid opened" "was closed $(fmt_duration $((now - lid_closed_at)))"
       elif [ "$lid_was_closed" = "-1" ]; then
-        event "Lid is open"
+        event lid-open "Lid is open"
       fi
       lid_was_closed=0
-      lid_str="open"
     fi
 
     # Low Power Mode: on with the lid closed, on battery, at/below LOW_POWER_AT.
@@ -756,32 +1146,32 @@ cmd_start() {
         lpm_cur="$(lpm_battery_value "$LPM_KEY")"
         if [ "$lpm_cur" = "1" ]; then
           lpm_on=1                                  # already on: nothing to restore later
-          event "Low Power Mode is already on (battery ${BATT_PCT}%)"
+          event lpm "Low Power Mode is already on" "battery ${BATT_PCT}%"
         elif [ -n "$lpm_cur" ]; then
           echo "$LPM_KEY $lpm_cur" >"$LPM_FILE"
           if set_lpm "$LPM_KEY" 1; then
             lpm_on=1
-            event "Low Power Mode on (battery ${BATT_PCT}%, lid closed)"
+            event lpm "Low Power Mode on" "battery ${BATT_PCT}%, lid closed"
             if [ "$lpm_notified" = "0" ]; then
               notify "Battery at ${BATT_PCT}%: Low Power Mode on until you open the lid or plug in."
               lpm_notified=1
             fi
           else
             rm -f "$LPM_FILE"; lpm_failed=1
-            event "${YLW}Could not turn on Low Power Mode (sudo needed; see setup-sudo)${RST}"
+            event warn "Could not turn on Low Power Mode" "sudo needed; see setup-sudo"
           fi
         else
           lpm_failed=1
-          event "${YLW}Could not read the Low Power Mode setting${RST}"
+          event warn "Could not read the Low Power Mode setting"
         fi
       elif [ "$lpm_want" = "0" ]; then
         if [ "$lpm_on" = "1" ]; then
           if [ "$lid_was_closed" != "1" ]; then lpm_why="lid opened"; else lpm_why="plugged in"; fi
           if [ -f "$LPM_FILE" ]; then
-            if lpm_restore; then event "Low Power Mode back to $LPM_RESTORED ($lpm_why)"
-            else event "${YLW}Could not restore Low Power Mode (will retry at exit)${RST}"; fi
+            if lpm_restore; then event lpm "Low Power Mode back to $LPM_RESTORED" "$lpm_why"
+            else event warn "Could not restore Low Power Mode" "will retry at exit"; fi
           else
-            event "Low Power Mode left on ($lpm_why; it was on before)"
+            event lpm "Low Power Mode left on" "$lpm_why; it was on before"
           fi
           lpm_on=0
         fi
@@ -795,35 +1185,34 @@ cmd_start() {
       # Keep the sudo timestamp fresh so the restore at exit doesn't need a password.
       if ! sudo -n -v >/dev/null 2>&1 && ! sudo -n -l "$PMSET" -a disablesleep 0 >/dev/null 2>&1; then
         if [ "$sudo_warned" = "0" ]; then
-          event "${YLW}sudo session expired — restoring sleep at exit may ask for your password${RST}"
+          event warn "sudo session expired" "restoring sleep at exit may ask for your password"
           sudo_warned=1
         fi
       fi
 
       # Re-assert in case something else flipped it back.
       if [ "$(sleep_disabled)" != "1" ]; then
-        event "${YLW}SleepDisabled was reset by something else — re-applying${RST}"
-        set_sleep_disabled 1 >/dev/null 2>&1 || event "${RED}Could not re-apply SleepDisabled=1${RST}"
+        event warn "SleepDisabled was reset by something else" "re-applying"
+        set_sleep_disabled 1 >/dev/null 2>&1 || event error "Could not re-apply SleepDisabled=1"
       fi
 
       read_battery
 
       if [ -n "$BATT_PCT" ]; then
         if [ "$ON_AC" != "$prev_on_ac" ]; then
-          if [ "$ON_AC" = "1" ]; then event "Power: AC adapter (${BATT_PCT}%)"
-          else event "Power: running on battery (${BATT_PCT}%)"; fi
+          if [ "$ON_AC" = "1" ]; then event power-ac "Plugged in" "${BATT_PCT}%"
+          else event power-batt "On battery" "${BATT_PCT}%"; fi
         elif [ "$ON_AC" = "0" ] && [ $((BATT_PCT / 5)) != "$prev_batt_step" ]; then
-          event "Battery ${BATT_PCT}%"
+          event battery "Battery ${BATT_PCT}%"
         fi
         prev_on_ac=$ON_AC; prev_batt_step=$((BATT_PCT / 5))
       fi
 
-      if claude_running; then is_running=1; seen_claude=1; claude_str="${GRN}running${RST}"
-      else is_running=0; claude_str="not running"; fi
+      if claude_running; then is_running=1; seen_claude=1; else is_running=0; fi
       if [ "$is_running" != "$prev_claude" ]; then
-        if [ "$is_running" = "1" ]; then event "Claude is running"
-        elif [ -n "$prev_claude" ]; then event "Claude quit"
-        else event "Claude is not running"; fi
+        if [ "$is_running" = "1" ]; then event claude "Claude is running"
+        elif [ -n "$prev_claude" ]; then event claude "Claude quit"
+        else event claude "Claude is not running"; fi
         prev_claude=$is_running
       fi
     fi
@@ -833,7 +1222,9 @@ cmd_start() {
       read_battery; read_battery_temp; read_pressure
 
       if [ -n "$PRESSURE" ] && [ "$PRESSURE_NAME" != "$prev_pressure" ]; then
-        [ -n "$prev_pressure" ] && event "Thermal pressure: $PRESSURE_NAME"
+        if [ -n "$prev_pressure" ]; then
+          case "$PRESSURE" in 0) event heat-ok "Thermal pressure $PRESSURE_NAME" ;; 1) event heat-warm "Thermal pressure $PRESSURE_NAME" ;; *) event heat-hot "Thermal pressure $PRESSURE_NAME" ;; esac
+        fi
         prev_pressure=$PRESSURE_NAME
       fi
 
@@ -850,32 +1241,19 @@ cmd_start() {
           heat_sleep "$hot_reason"            # trapping/sleeping: act immediately
         elif [ -z "$hot_since" ]; then
           hot_since=$now
-          event "${YLW}Too hot: $hot_reason — will sleep the Mac if it lasts ${HEAT_MINUTES} min${RST}"
+          event heat-hot "Too hot: $hot_reason" "will sleep the Mac if it lasts ${HEAT_MINUTES} min"
         elif [ $((now - hot_since)) -ge "$heat_grace" ]; then
           heat_sleep "$hot_reason" "$(fmt_duration $((now - hot_since)))"
         fi
       elif [ -n "$hot_since" ]; then
-        event "Cooled down after $(fmt_duration $((now - hot_since))) ($(heat_summary))"
+        event heat-ok "Cooled down after $(fmt_duration $((now - hot_since)))" "$(heat_summary)"
         hot_since=""
       fi
 
-      heat_str=""
-      [ -n "$BATT_TEMP10" ] && heat_str="$(fmt_temp "$BATT_TEMP10")"
-      if [ -n "$PRESSURE" ] && { [ "$PRESSURE" -gt 0 ] || [ -z "$BATT_TEMP10" ]; }; then
-        heat_str="${heat_str:+$heat_str }pressure $PRESSURE_NAME"
-      fi
-      [ -n "$hot_since" ] && heat_str="${YLW}${heat_str} HOT${RST}"
+      heat_bar; HEAT_HIST=( "${HEAT_HIST[@]:1}" "$HB" )     # panel heat history
     fi
 
-    if [ -z "$BATT_PCT" ]; then power_str="power ?"
-    elif [ "$ON_AC" = "1" ]; then power_str="AC ${BATT_PCT}%"
-    else power_str="battery ${BATT_PCT}%"; fi
-    [ "$lpm_on" = "1" ] && power_str="$power_str LPM"
-
-    elapsed=$((now - start))
-    STATUS_LINE="$(printf '%sawake%s %s │ %s%s │ lid %s │ Claude: %s' \
-      "$GRN" "$RST" "$(fmt_duration "$elapsed")" "$power_str" "${heat_str:+ │ $heat_str}" "$lid_str" "$claude_str")"
-    draw_status
+    ui_draw
 
     if [ -n "$BATT_PCT" ] && [ "$ON_AC" = "0" ] && [ "$BATTERY_MIN" -gt 0 ] && [ "$BATT_PCT" -le "$BATTERY_MIN" ]; then
       stop_with "Battery at ${BATT_PCT}% (limit ${BATTERY_MIN}%), letting the Mac sleep"
@@ -888,7 +1266,7 @@ cmd_start() {
     fi
 
     # Sleep in the background + wait, so Ctrl-C/TERM are handled immediately.
-    sleep "$LID_TICK" &
+    sleep "$TICK" &
     wait $! 2>/dev/null
   done
 }

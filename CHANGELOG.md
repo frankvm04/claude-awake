@@ -4,6 +4,29 @@ All notable changes to claude-awake. Versions follow [Semantic Versioning](https
 
 ## [Unreleased]
 
+### Changed
+
+- New look. At startup, a banner and a checklist of what's active; while
+  running, a dashboard pinned at the bottom of the window and updated every
+  second (awake time, lid and screen, battery gauge, a 2-minute heat graph with
+  the heat guard's countdown, Claude, displays, limits). With `-v`, events
+  scroll above it as a timeline with a symbol per kind.
+- Narrower than 64 columns, the dashboard becomes one status line that always
+  fits; resizing the window redraws it. Piped output gets plain lines with no
+  colors or redraws. `NO_COLOR` turns colors off.
+
+### Added
+
+- `--log FILE`: append every event to FILE as plain, dated text while the
+  dashboard stays on screen (with or without `-v`).
+
+### Fixed
+
+- While running, claude-awake no longer waits on a sudo password prompt (for
+  example to switch Low Power Mode with the lid closed after the sudo session
+  expired). Such a wait could block the heat guard; the change is now just
+  logged as failed. Prompts are still allowed at startup and exit.
+
 ## [1.3.0] - 2026-11-10
 
 ### Added

@@ -161,11 +161,44 @@ claude-awake diagnose        # details to paste into a bug report
 | `-P L`, `--max-pressure L` | Heat guard: thermal pressure limit, `moderate`, `heavy`, `trapping`, or `off` (default `heavy`) |
 | `-H M`, `--heat-minutes M` | Heat guard: how long it must stay too hot before sleeping (default 2) |
 | `-L N`, `--low-power-at N` | With the lid closed on battery at N% or below, turn on Low Power Mode (default 35, `0` = off) |
+| `--log FILE` | Also append every event to FILE as plain text (even without `-v`) |
 
-Start it in a Terminal window, then close the lid. It keeps running and shows a
-status line: elapsed time, power, temperature, the lid and screen state, and
-whether Claude is running. You can also start it with the lid already closed on an external monitor
-(clamshell mode); the monitor stays on.
+Start it in a Terminal window, then close the lid. It keeps running. You can also
+start it with the lid already closed on an external monitor (clamshell mode); the
+monitor stays on.
+
+### What you see
+
+At startup, a banner and a checklist of what's active:
+
+```
+  ✓ lid-close sleep disabled              ✓ Low Power Mode at 35%
+  ✓ screen off under the lid              ✓ stop on battery at 20%
+  ✓ heat guard: pressure ≥ heavy, 2 min   ○ time limit (none)
+```
+
+Then a dashboard, pinned at the bottom of the window and updated every second:
+
+```
+╭─ claude-awake ─────────────────────────────────── 1.3.0 ─╮
+│ ⠹ AWAKE  0h 42m 10s              lid closed · screen off │
+│                                                          │
+│ Battery   ▰▰▰▰▱▱▱▱▱▱▱▱  34% on battery  ▾ LPM            │
+│ Heat      ▁▁▁▁▃▃▃▁▁▁▁▁  nominal                          │
+│ Claude    ● running                                      │
+│ Display   ○ built-in only                                │
+│ stop 20% · heat: heavy 2m · LPM 35%                      │
+╰──────────────────────────────────────────────────────────╯
+```
+
+- **Heat** shows the last 2 minutes (one bar per 10 seconds): battery temperature
+  if your Mac reports it, otherwise thermal pressure. When the heat guard is
+  counting down, it says so and shows how long until it sleeps the Mac.
+- In a window narrower than 64 columns, the dashboard becomes one status line.
+  Resizing the window redraws it to fit.
+- When the output isn't a terminal (for example piped to another command), it
+  prints plain lines with no colors or redraws.
+- Set `NO_COLOR=1` to turn colors off.
 
 `claude-awake status` shows the current state at any time:
 
@@ -227,7 +260,7 @@ it turns on again. It's also put back when claude-awake exits, and
 - Changing it needs `sudo`. claude-awake keeps its sudo session fresh while it
   runs, and [`setup-sudo`](#skip-the-password-prompt-optional) allows it without
   a password.
-- The status line shows `LPM` while it's on, `-v` logs each change, and `status`
+- The dashboard shows `LPM` while it's on, `-v` logs each change, and `status`
   shows the current battery setting. A notification appears the first time it
   turns on in a run.
 - Set the level above the battery stop (`-b`, default 20%): for example Low
@@ -235,17 +268,18 @@ it turns on again. It's also put back when claude-awake exits, and
 
 ## Event log (`-v`)
 
-With `-v`, events print above the live status line:
+With `-v`, events scroll above the dashboard as a timeline:
 
 ```
-13:07:16  Lid-close sleep disabled (was SleepDisabled=0)
-13:07:21  Claude is running
-13:07:23  Lid closed — screen turned off
-13:07:27  Power: running on battery (80%)
-13:07:29  Battery 74%
-13:07:56  No activity for 0h00m25s — the Mac appears to have slept
-13:08:01  Lid opened (was closed 0h00m38s)
-13:08:03  Claude quit
+  15:10:12 ┬ ◆ claude-awake started
+  15:10:12 ├ ◆ Claude is running
+  15:10:15 ├ ▣ Lid closed — screen turned off
+  15:10:22 ├ ↯ On battery — 36%
+  15:10:28 ├ ▾ Low Power Mode on — battery 34%, lid closed
+  15:10:32 ├ ≈ Thermal pressure moderate
+  15:10:42 ├ ↯ Plugged in — 34%
+  15:10:43 ├ ▾ Low Power Mode back to off — plugged in
+  15:10:45 ├ □ Lid opened — was closed 0h00m30s
 ```
 
 What gets logged:
@@ -261,10 +295,11 @@ What gets logged:
 - Gaps where the script stopped running. A gap usually means the Mac slept anyway,
   which helps you check that keeping it awake really worked.
 
-To keep a copy of the log as well (the file also gets the status-line refreshes):
+To keep a copy of the events in a file, with dates, while the dashboard stays on
+screen (this works with or without `-v`):
 
 ```bash
-claude-awake -v | tee ~/claude-awake.log
+claude-awake -v --log ~/claude-awake.log
 ```
 
 ## Restoring sleep
