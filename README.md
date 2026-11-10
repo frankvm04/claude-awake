@@ -94,13 +94,13 @@ Each release is tagged (see [Releases](https://github.com/frankvm04/claude-awake
 and the [changelog](CHANGELOG.md)). To use a tagged version from a clone:
 
 ```bash
-git -C ~/src/claude-awake fetch --tags && git -C ~/src/claude-awake checkout v1.0.0
+git -C ~/src/claude-awake fetch --tags && git -C ~/src/claude-awake checkout v1.1.0
 ```
 
 Or download that version's script directly:
 
 ```bash
-mkdir -p ~/bin && curl -fsSL https://raw.githubusercontent.com/frankvm04/claude-awake/v1.0.0/claude-awake -o ~/bin/claude-awake && chmod +x ~/bin/claude-awake
+mkdir -p ~/bin && curl -fsSL https://raw.githubusercontent.com/frankvm04/claude-awake/v1.1.0/claude-awake -o ~/bin/claude-awake && chmod +x ~/bin/claude-awake
 ```
 
 ### Skip the password prompt (optional)
