@@ -15,8 +15,9 @@ back off when it exits.
 
 ## Requirements
 
-- macOS on Apple Silicon or Intel. It runs on the stock `/bin/bash` (3.2), with no
-  other dependencies.
+- A MacBook (Air or Pro), Apple Silicon or Intel. claude-awake is for MacBooks
+  only: on a Mac without a lid, it and the installer stop with a message.
+- macOS. It runs on the stock `/bin/bash` (3.2), with no other dependencies.
 - An administrator account: changing the sleep setting uses `sudo`. To avoid the
   password prompt, see [Skip the password prompt](#skip-the-password-prompt-optional).
 
@@ -189,11 +190,10 @@ after waking.
 It watches two readings. Neither needs a password, and both work on Apple
 Silicon and Intel Macs:
 
-- **Battery temperature** (MacBooks), from `ioreg -r -n AppleSmartBattery`. The
-  default limit is 45 °C. Not every Mac reports it: desktops have no battery,
-  and recent macOS versions (for example macOS 27 on Apple Silicon) no longer
-  publish it. Then the heat guard uses thermal pressure only, and `status` and
-  the startup message say so.
+- **Battery temperature**, from `ioreg -r -n AppleSmartBattery`. The default
+  limit is 45 °C. Recent macOS versions (for example macOS 27 on Apple Silicon)
+  no longer publish it. Then the heat guard uses thermal pressure only, and
+  `status` and the startup message say so.
 - **Thermal pressure**, the level macOS itself uses to decide when to slow the
   processor: nominal, moderate, heavy, trapping, sleeping. It is read with
   `notifyutil -g com.apple.system.thermalpressurelevel`. The default limit is

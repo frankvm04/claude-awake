@@ -68,7 +68,7 @@ notify() {
 
 usage() {
   cat <<EOF
-${B}claude-awake ${VERSION}${RST} — keep your Mac and Claude running with the lid closed
+${B}claude-awake ${VERSION}${RST} — keep your MacBook and Claude running with the lid closed
 
 ${B}Usage${RST}
   $PROG [start] [options]   Keep the Mac awake (lid closed OK) until Ctrl-C
@@ -111,6 +111,12 @@ surface, not in a bag. Being plugged in is best for long runs.${RST}
 EOF
 }
 
+require_macbook() {
+  # claude-awake is for MacBooks only: they have a lid sensor (AppleClamshellState).
+  "$IOREG" -r -k AppleClamshellState -d 4 2>/dev/null | grep -q '"AppleClamshellState"' ||
+    die "claude-awake is for MacBooks only, and this Mac has no lid."
+}
+
 require_macos() {
   [ "$(uname -s)" = "Darwin" ] || die "this tool only works on macOS."
   [ -x "$PMSET" ] || die "$PMSET not found."
@@ -132,7 +138,7 @@ set_sleep_disabled() {
   return 1
 }
 
-# Sets globals: BATT_PCT (empty if no battery), ON_AC (1/0)
+# Sets globals: BATT_PCT (empty if it can't be read), ON_AC (1/0)
 read_battery() {
   local out
   out="$("$PMSET" -g batt 2>/dev/null)"
@@ -156,8 +162,8 @@ screen_off() {
 
 read_battery_temp() {
   # Sets BATT_TEMP10: battery temperature in tenths of a °C, empty if unknown
-  # (desktop Macs have no battery). AppleSmartBattery reports hundredths of a
-  # °C, e.g. "Temperature" = 3055 is 30.55 °C.
+  # (recent macOS versions no longer report it). AppleSmartBattery reports
+  # hundredths of a °C, e.g. "Temperature" = 3055 is 30.55 °C.
   local raw
   raw="$("$IOREG" -r -n AppleSmartBattery 2>/dev/null |
          awk '/"Temperature" = [0-9]/ { sub(/.*"Temperature" = /, ""); print $1 + 0; exit }')"
@@ -307,6 +313,7 @@ fmt_duration() {
 
 cmd_status() {
   require_macos
+  require_macbook
   local sd pid
   sd="$(sleep_disabled)"
   read_battery
@@ -350,7 +357,7 @@ cmd_status() {
       warn "A previous run left Low Power Mode changed. Run: $PROG stop"
     fi
   else
-    say "  Power           : AC (no battery found)"
+    say "  Power           : unknown (couldn't read the battery)"
   fi
 }
 
@@ -476,6 +483,7 @@ heat_sleep() {
 
 cmd_start() {
   require_macos
+  require_macbook
 
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -720,9 +728,6 @@ cmd_start() {
       fi
 
       read_battery
-      if [ -z "$BATT_PCT" ]; then power_str="AC"
-      elif [ "$ON_AC" = "1" ]; then power_str="AC ${BATT_PCT}%"
-      else power_str="battery ${BATT_PCT}%"; fi
 
       if [ -n "$BATT_PCT" ]; then
         if [ "$ON_AC" != "$prev_on_ac" ]; then
@@ -783,7 +788,7 @@ cmd_start() {
       [ -n "$hot_since" ] && heat_str="${YLW}${heat_str} HOT${RST}"
     fi
 
-    if [ -z "$BATT_PCT" ]; then power_str="AC"
+    if [ -z "$BATT_PCT" ]; then power_str="power ?"
     elif [ "$ON_AC" = "1" ]; then power_str="AC ${BATT_PCT}%"
     else power_str="battery ${BATT_PCT}%"; fi
     [ "$lpm_on" = "1" ] && power_str="$power_str LPM"

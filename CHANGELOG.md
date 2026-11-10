@@ -18,6 +18,9 @@ All notable changes to claude-awake. Versions follow [Semantic Versioning](https
 
 ### Changed
 
+- MacBook only: on a Mac without a lid, `claude-awake` (start and `status`) and
+  the installer stop with a clear message. `stop`, `remove-sudo`, and
+  `install.sh --uninstall` still work, so cleanup is never blocked.
 - The battery level is read every 10 seconds (was 30), so plugging in is
   noticed sooner; the status line's power text refreshes with it.
 - `install.sh --uninstall` also restores Low Power Mode left changed by a crash.

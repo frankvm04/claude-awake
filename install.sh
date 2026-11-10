@@ -55,6 +55,9 @@ with_tty() {
 }
 
 do_install() {
+  /usr/sbin/ioreg -r -k AppleClamshellState -d 4 2>/dev/null | grep -q '"AppleClamshellState"' ||
+    die "claude-awake is for MacBooks only, and this Mac has no lid."
+
   mkdir -p "$BIN"
 
   # On a new Mac /usr/bin/git is a stub that opens an installer dialog,
