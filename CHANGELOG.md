@@ -4,6 +4,24 @@ All notable changes to claude-awake. Versions follow [Semantic Versioning](https
 
 ## [Unreleased]
 
+### Added
+
+- Low Power Mode: with the lid closed, on battery, at 35% or below (`-L N`,
+  `0` = off), claude-awake turns on Low Power Mode. Opening the lid or plugging
+  in puts the setting back the way it was; it's also restored on exit and by
+  `claude-awake stop` after a crash. Only the battery setting is changed.
+  Supports both `lowpowermode` and `powermode` (Macs with High Power Mode).
+- `status` shows the Low Power Mode battery setting; the status line shows `LPM`
+  while it's on; `-v` logs each change.
+- `setup-sudo` also allows the Low Power Mode commands. Run it again if you set
+  it up before.
+
+### Changed
+
+- The battery level is read every 10 seconds (was 30), so plugging in is
+  noticed sooner; the status line's power text refreshes with it.
+- `install.sh --uninstall` also restores Low Power Mode left changed by a crash.
+
 ## [1.1.0] - 2026-11-10
 
 ### Added

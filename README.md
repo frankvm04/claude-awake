@@ -105,14 +105,16 @@ mkdir -p ~/bin && curl -fsSL https://raw.githubusercontent.com/frankvm04/claude-
 
 ### Skip the password prompt (optional)
 
-This adds a sudoers rule that allows only `pmset -a disablesleep 0|1` without a
-password:
+This adds a sudoers rule that allows only these commands without a password:
+`pmset -a disablesleep 0|1` (the sleep setting) and `pmset -b lowpowermode 0|1`
+/ `pmset -b powermode 0|1|2` (Low Power Mode on battery):
 
 ```bash
 claude-awake setup-sudo
 ```
 
-Undo it with `claude-awake remove-sudo`.
+Undo it with `claude-awake remove-sudo`. If you ran `setup-sudo` before version
+1.2.0, run it again to add the Low Power Mode commands.
 
 ### Uninstall
 
@@ -122,7 +124,8 @@ curl -fsSL https://raw.githubusercontent.com/frankvm04/claude-awake/main/install
 
 Or, from the clone: `~/src/claude-awake/install.sh --uninstall`. This:
 
-- restores normal sleep, if a run is active or a crashed run left sleep turned off
+- restores normal sleep and Low Power Mode, if a run is active or a crashed run
+  left them changed
 - removes the `setup-sudo` rule, if there is one
 - removes `~/bin/claude-awake`, the clone, `~/.claude-awake/`, and the PATH line
   the installer added
@@ -155,6 +158,7 @@ claude-awake stop            # restore normal sleep (e.g. after a force-kill)
 | `-T C`, `--max-temp C` | Heat guard: battery temperature limit in °C (default 45, `0` = off) |
 | `-P L`, `--max-pressure L` | Heat guard: thermal pressure limit, `moderate`, `heavy`, `trapping`, or `off` (default `heavy`) |
 | `-H M`, `--heat-minutes M` | Heat guard: how long it must stay too hot before sleeping (default 2) |
+| `-L N`, `--low-power-at N` | With the lid closed on battery at N% or below, turn on Low Power Mode (default 35, `0` = off) |
 
 Start it in a Terminal window, then close the lid. It keeps running and shows a
 status line: elapsed time, power, temperature, the lid and screen state, and
@@ -172,6 +176,7 @@ claude-awake status
   External display: 1 connected (screens are left on)
   Temperature     : battery 34.2 °C, pressure nominal
   Power           : AC, battery 92%
+  Low Power Mode  : off (battery setting)
 ```
 
 ## Heat guard
@@ -204,6 +209,29 @@ hot and shuts down at critical temperatures. The heat guard acts earlier, before
 sustained heat under a closed lid wears the battery. Run with `-v` once to see
 your Mac's usual readings, then adjust `-T` or `-P` if needed.
 
+## Low Power Mode
+
+With the lid closed, on battery, at 35% or below (`-L`), claude-awake turns on
+macOS Low Power Mode. It makes the battery last longer and the Mac run cooler.
+As soon as you open the lid or plug in, it puts the setting back the way it was;
+if you close the lid again, or unplug again, while still at or below the level,
+it turns on again. It's also put back when claude-awake exits, and
+`claude-awake stop` puts it back after a crash.
+
+- It changes only the battery setting (`pmset -b`), so your plugged-in settings
+  are never touched. If Low Power Mode was already on, it's left alone.
+- Most Macs use the `lowpowermode` setting; MacBook Pros that also offer High
+  Power Mode use `powermode`. claude-awake detects which, and puts High Power
+  Mode or automatic back as it was. If a Mac has neither, it says so at startup.
+- Changing it needs `sudo`. claude-awake keeps its sudo session fresh while it
+  runs, and [`setup-sudo`](#skip-the-password-prompt-optional) allows it without
+  a password.
+- The status line shows `LPM` while it's on, `-v` logs each change, and `status`
+  shows the current battery setting. A notification appears the first time it
+  turns on in a run.
+- Set the level above the battery stop (`-b`, default 20%): for example Low
+  Power Mode at 35%, stop at 20%.
+
 ## Event log (`-v`)
 
 With `-v`, events print above the live status line:
@@ -223,6 +251,7 @@ What gets logged:
 
 - The lid opening and closing, including how long it was closed.
 - External displays connecting and disconnecting.
+- Low Power Mode turning on, and going back when the lid opens or you plug in.
 - Thermal pressure changes, and the heat guard warning, cooling down, or sleeping
   the Mac.
 - The power source changing, and each 5% drop in battery while on battery.

@@ -13,6 +13,8 @@
 #     display, and macOS already switches the built-in panel off in clamshell mode.
 #   * Heat guard: if the battery temperature or macOS's thermal pressure stays too
 #     high, it re-enables sleep and puts the Mac to sleep (`pmset sleepnow`).
+#   * Low Power Mode: with the lid closed on battery at/below 35%, it turns Low
+#     Power Mode on; opening the lid or plugging in puts it back.
 #   * When claude-awake exits (Ctrl-C, timer, battery guard, Claude quit, terminal
 #     closed), the original sleep setting is restored.
 #
@@ -25,6 +27,7 @@ PROG="$(basename "$0")"
 STATE_DIR="${HOME}/.claude-awake"
 ORIG_FILE="${STATE_DIR}/original-sleep-disabled"   # value to restore
 PID_FILE="${STATE_DIR}/pid"
+LPM_FILE="${STATE_DIR}/original-low-power"     # "<setting> <value>" to restore
 SUDOERS_FILE="/etc/sudoers.d/claude-awake"
 PMSET="/usr/bin/pmset"
 IOREG="/usr/sbin/ioreg"
@@ -41,6 +44,7 @@ VERBOSE=0             # 1 = print timestamped event log lines
 MAX_TEMP=45           # sleep if battery stays at/above this °C (0 = off)
 MAX_PRESSURE=heavy    # sleep if thermal pressure stays at/above this (off = off)
 HEAT_MINUTES=2        # how long it must stay too hot before sleeping
+LOW_POWER_AT=35       # Low Power Mode on battery at/below this % with the lid closed (0 = off)
 
 CAFF_PID=""
 CLEANED_UP=0
@@ -88,6 +92,11 @@ ${B}Heat guard${RST} (puts the Mac to sleep if it stays too hot)
   -P, --max-pressure LEVEL  Thermal pressure limit: moderate, heavy, trapping,
                             or off (default ${MAX_PRESSURE})
   -H, --heat-minutes M      How long it must stay too hot (default ${HEAT_MINUTES})
+
+${B}Low Power Mode${RST}
+  -L, --low-power-at N      With the lid closed and on battery at N% or below,
+                            turn on Low Power Mode (default ${LOW_POWER_AT}; 0 = off).
+                            Opening the lid or plugging in puts it back.
 
 ${B}Examples${RST}
   $PROG                      # awake until you press Ctrl-C
@@ -199,6 +208,59 @@ heat_summary() {
   printf '%s' "${out:-unavailable}"
 }
 
+# Low Power Mode. Changed only in the battery profile (pmset -b), so the
+# plugged-in settings are never touched. Changing it needs sudo.
+
+lpm_key() {
+  # Prints the pmset setting that controls Low Power Mode, or nothing.
+  # Most Macs: lowpowermode (0 off, 1 on). Macs that also offer High Power Mode:
+  # powermode (0 automatic, 1 low power, 2 high power). Either way 1 = low power.
+  local out
+  out="$("$PMSET" -g custom 2>/dev/null)"
+  if printf '%s\n' "$out" | grep -qE '^[[:space:]]*lowpowermode[[:space:]]'; then echo lowpowermode
+  elif printf '%s\n' "$out" | grep -qE '^[[:space:]]*powermode[[:space:]]'; then echo powermode
+  fi
+}
+
+lpm_battery_value() {
+  # $1 = setting. Prints its value in the "Battery Power" profile.
+  "$PMSET" -g custom 2>/dev/null | awk -v k="$1" '
+    /^[^[:space:]].*:[[:space:]]*$/ { sect = $0; next }
+    sect ~ /^Battery Power/ && $1 == k { print $2; exit }'
+}
+
+lpm_name() {
+  # $1 = setting, $2 = value -> human name
+  case "$1:$2" in
+    lowpowermode:1|powermode:1) echo "on" ;;
+    lowpowermode:0) echo "off" ;;
+    powermode:0) echo "automatic" ;;
+    powermode:2) echo "High Power Mode" ;;
+    *) echo "$2" ;;
+  esac
+}
+
+set_lpm() {
+  # $1 = setting, $2 = value. Battery profile only.
+  if sudo -n "$PMSET" -b "$1" "$2" >/dev/null 2>&1; then return 0; fi
+  if [ -t 0 ]; then sudo "$PMSET" -b "$1" "$2" >/dev/null; return $?; fi
+  return 1
+}
+
+lpm_restore() {
+  # Put Low Power Mode back as recorded in LPM_FILE, if we changed it.
+  # Sets LPM_RESTORED to the restored value's name.
+  local key="" val=""
+  LPM_RESTORED=""
+  [ -f "$LPM_FILE" ] || return 0
+  read -r key val <"$LPM_FILE" || true
+  if [ -z "$key" ] || [ -z "$val" ]; then rm -f "$LPM_FILE"; return 0; fi
+  if set_lpm "$key" "$val"; then
+    rm -f "$LPM_FILE"; LPM_RESTORED="$(lpm_name "$key" "$val")"; return 0
+  fi
+  return 1
+}
+
 external_display_count() {
   # Prints how many non-built-in displays are connected and online.
   # system_profiler lists each display under a "Displays:" heading, one level
@@ -277,6 +339,16 @@ cmd_status() {
   if [ -n "$BATT_PCT" ]; then
     if [ "$ON_AC" = "1" ]; then say "  Power           : AC, battery ${BATT_PCT}%"
     else say "  Power           : battery ${BATT_PCT}%"; fi
+    local key
+    key="$(lpm_key)"
+    if [ -n "$key" ]; then
+      say "  Low Power Mode  : $(lpm_name "$key" "$(lpm_battery_value "$key")") (battery setting)"
+    else
+      say "  Low Power Mode  : not available on this Mac"
+    fi
+    if [ -f "$LPM_FILE" ] && ! other_instance_pid >/dev/null; then
+      warn "A previous run left Low Power Mode changed. Run: $PROG stop"
+    fi
   else
     say "  Power           : AC (no battery found)"
   fi
@@ -299,6 +371,10 @@ cmd_stop() {
   fi
   rm -f "$ORIG_FILE" "$PID_FILE"
   ok "Normal sleep restored (SleepDisabled=$(sleep_disabled))."
+  if [ -f "$LPM_FILE" ]; then
+    if lpm_restore; then ok "Low Power Mode restored to $LPM_RESTORED (battery setting)."
+    else warn "Could not restore Low Power Mode. Check System Settings → Battery."; fi
+  fi
 }
 
 cmd_setup_sudo() {
@@ -307,15 +383,19 @@ cmd_setup_sudo() {
   user="$(id -un)"
   tmp="$(mktemp)"
   cat >"$tmp" <<EOF
-# Installed by claude-awake: allow $user to toggle lid-close sleep without a password.
-$user ALL=(root) NOPASSWD: $PMSET -a disablesleep 0, $PMSET -a disablesleep 1
+# Installed by claude-awake: allow $user to toggle lid-close sleep and
+# battery Low Power Mode without a password.
+$user ALL=(root) NOPASSWD: $PMSET -a disablesleep 0, $PMSET -a disablesleep 1, \\
+  $PMSET -b lowpowermode 0, $PMSET -b lowpowermode 1, \\
+  $PMSET -b powermode 0, $PMSET -b powermode 1, $PMSET -b powermode 2
 EOF
   if ! /usr/sbin/visudo -cf "$tmp" >/dev/null; then rm -f "$tmp"; die "generated sudoers rule failed validation."; fi
   info "Installing $SUDOERS_FILE (admin password required)…"
   sudo install -m 0440 -o root -g wheel "$tmp" "$SUDOERS_FILE" || { rm -f "$tmp"; die "install failed."; }
   rm -f "$tmp"
-  ok "Done. '$PROG' can now turn lid-close sleep on/off without asking for a password."
-  say "${DIM}The rule only allows: pmset -a disablesleep 0|1. Undo with: $PROG remove-sudo${RST}"
+  ok "Done. '$PROG' can now change lid-close sleep and Low Power Mode without a password."
+  say "${DIM}The rule only allows: pmset -a disablesleep 0|1, pmset -b lowpowermode 0|1,"
+  say "pmset -b powermode 0|1|2. Undo with: $PROG remove-sudo${RST}"
 }
 
 cmd_remove_sudo() {
@@ -332,6 +412,10 @@ cleanup() {
   CLEANED_UP=1
   printf '\n'
   [ -n "$CAFF_PID" ] && kill "$CAFF_PID" 2>/dev/null
+  if [ -f "$LPM_FILE" ]; then
+    if lpm_restore; then ok "Low Power Mode restored to $LPM_RESTORED (battery setting)."
+    else warn "Could NOT restore Low Power Mode. Run: $PROG stop"; fi
+  fi
   local orig=0
   [ -f "$ORIG_FILE" ] && orig="$(cat "$ORIG_FILE")"
   if set_sleep_disabled "$orig"; then
@@ -404,6 +488,7 @@ cmd_start() {
       -T|--max-temp)           shift; MAX_TEMP="${1:-}" ;;
       -P|--max-pressure)       shift; MAX_PRESSURE="${1:-}" ;;
       -H|--heat-minutes)       shift; HEAT_MINUTES="${1:-}" ;;
+      -L|--low-power-at)       shift; LOW_POWER_AT="${1:-}" ;;
       -h|--help)               usage; exit 0 ;;
       *) die "unknown option: $1 (see '$PROG help')" ;;
     esac
@@ -420,6 +505,8 @@ cmd_start() {
   printf '%s' "$HEAT_MINUTES" | grep -Eq '^[0-9]+(\.[0-9]+)?$' || die "--heat-minutes needs a number, e.g. 2 or 0.5"
   local heat_grace
   heat_grace="$(awk -v m="$HEAT_MINUTES" 'BEGIN { printf "%d", m * 60 }')"
+  case "$LOW_POWER_AT" in ''|*[!0-9]*) die "--low-power-at needs a whole number 0-100 (0 = off)." ;; esac
+  [ "$LOW_POWER_AT" -le 100 ] || die "--low-power-at needs a whole number 0-100 (0 = off)."
   case "$INTERVAL"    in ''|*[!0-9]*|0) die "--interval needs a positive whole number." ;; esac
   printf '%s' "$MAX_HOURS" | grep -Eq '^[0-9]+(\.[0-9]+)?$' || die "--hours needs a number, e.g. 2 or 1.5"
   local max_secs
@@ -444,6 +531,10 @@ cmd_start() {
     sudo -v || { [ "$created_orig" = 1 ] && rm -f "$ORIG_FILE"; die "sudo failed."; }
   fi
   echo $$ >"$PID_FILE"
+
+  if [ -f "$LPM_FILE" ]; then
+    lpm_restore && info "Restored Low Power Mode left changed by a previous run ($LPM_RESTORED)."
+  fi
 
   trap cleanup EXIT
   trap 'exit 130' INT
@@ -470,6 +561,16 @@ cmd_start() {
   [ "$VERBOSE" = "1" ] && say "  • Verbose: logging lid, screen, power, battery and Claude events"
   [ "$BATTERY_MIN" -gt 0 ] && say "  • Stops if on battery at ${BATTERY_MIN}% or below"
   read_battery; read_battery_temp; read_pressure
+  # Low Power Mode needs a battery and a pmset setting for it.
+  local LPM_KEY=""
+  if [ "$LOW_POWER_AT" -gt 0 ] && [ -n "$BATT_PCT" ]; then
+    LPM_KEY="$(lpm_key)"
+    if [ -n "$LPM_KEY" ]; then
+      say "  • Turns on Low Power Mode with the lid closed on battery at ${LOW_POWER_AT}% or below"
+    else
+      warn "Low Power Mode can't be changed on this Mac (no pmset setting for it)."
+    fi
+  fi
   if [ "$MAX_TEMP" -gt 0 ] && [ -n "$BATT_PCT" ] && [ -z "$BATT_TEMP10" ] && [ -n "$PRESSURE" ] && [ "$max_pressure_rank" -gt 0 ]; then
     say "  • This Mac doesn't report battery temperature; the heat guard uses thermal pressure"
   fi
@@ -500,6 +601,9 @@ cmd_start() {
   local ext=0 prev_ext="" next_display_check=0
   # Heat guard: checked every HEAT_CHECK s; must stay too hot for heat_grace s.
   local HEAT_CHECK=10 next_heat_check=0 hot_since="" hot_reason prev_pressure="" heat_str=""
+  # Low Power Mode: lpm_on = we're in the low-power state (set by us, or it was
+  # already on); lpm_failed stops retrying until the conditions change.
+  local lpm_on=0 lpm_failed=0 lpm_notified=0 lpm_want lpm_cur lpm_why
   while :; do
     now=$SECONDS
 
@@ -554,6 +658,50 @@ cmd_start() {
       lid_str="open"
     fi
 
+    # Low Power Mode: on with the lid closed, on battery, at/below LOW_POWER_AT.
+    # Opening the lid or plugging in puts it back the way it was.
+    if [ -n "$LPM_KEY" ]; then
+      lpm_want=0
+      if [ "$lid_was_closed" = "1" ] && [ -n "$BATT_PCT" ] && [ "$ON_AC" = "0" ] && [ "$BATT_PCT" -le "$LOW_POWER_AT" ]; then
+        lpm_want=1
+      fi
+      if [ "$lpm_want" = "1" ] && [ "$lpm_on" = "0" ] && [ "$lpm_failed" = "0" ]; then
+        lpm_cur="$(lpm_battery_value "$LPM_KEY")"
+        if [ "$lpm_cur" = "1" ]; then
+          lpm_on=1                                  # already on: nothing to restore later
+          event "Low Power Mode is already on (battery ${BATT_PCT}%)"
+        elif [ -n "$lpm_cur" ]; then
+          echo "$LPM_KEY $lpm_cur" >"$LPM_FILE"
+          if set_lpm "$LPM_KEY" 1; then
+            lpm_on=1
+            event "Low Power Mode on (battery ${BATT_PCT}%, lid closed)"
+            if [ "$lpm_notified" = "0" ]; then
+              notify "Battery at ${BATT_PCT}%: Low Power Mode on until you open the lid or plug in."
+              lpm_notified=1
+            fi
+          else
+            rm -f "$LPM_FILE"; lpm_failed=1
+            event "${YLW}Could not turn on Low Power Mode (sudo needed; see setup-sudo)${RST}"
+          fi
+        else
+          lpm_failed=1
+          event "${YLW}Could not read the Low Power Mode setting${RST}"
+        fi
+      elif [ "$lpm_want" = "0" ]; then
+        if [ "$lpm_on" = "1" ]; then
+          if [ "$lid_was_closed" != "1" ]; then lpm_why="lid opened"; else lpm_why="plugged in"; fi
+          if [ -f "$LPM_FILE" ]; then
+            if lpm_restore; then event "Low Power Mode back to $LPM_RESTORED ($lpm_why)"
+            else event "${YLW}Could not restore Low Power Mode (will retry at exit)${RST}"; fi
+          else
+            event "Low Power Mode left on ($lpm_why; it was on before)"
+          fi
+          lpm_on=0
+        fi
+        lpm_failed=0
+      fi
+    fi
+
     if [ "$now" -ge "$next_check" ]; then
       next_check=$((now + INTERVAL))
 
@@ -598,7 +746,7 @@ cmd_start() {
 
     if [ "$now" -ge "$next_heat_check" ]; then
       next_heat_check=$((now + HEAT_CHECK))
-      read_battery_temp; read_pressure
+      read_battery; read_battery_temp; read_pressure
 
       if [ -n "$PRESSURE" ] && [ "$PRESSURE_NAME" != "$prev_pressure" ]; then
         [ -n "$prev_pressure" ] && event "Thermal pressure: $PRESSURE_NAME"
@@ -634,6 +782,11 @@ cmd_start() {
       fi
       [ -n "$hot_since" ] && heat_str="${YLW}${heat_str} HOT${RST}"
     fi
+
+    if [ -z "$BATT_PCT" ]; then power_str="AC"
+    elif [ "$ON_AC" = "1" ]; then power_str="AC ${BATT_PCT}%"
+    else power_str="battery ${BATT_PCT}%"; fi
+    [ "$lpm_on" = "1" ] && power_str="$power_str LPM"
 
     elapsed=$((now - start))
     STATUS_LINE="$(printf '%sawake%s %s │ %s%s │ lid %s │ Claude: %s' \

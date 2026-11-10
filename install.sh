@@ -14,9 +14,10 @@
 #   3. Adds ~/bin to PATH in your shell profile if it is not there yet.
 #
 # Uninstall reverses all of that, plus anything claude-awake itself set up:
-#   restores normal sleep if a run is active or crashed, removes the optional
-#   sudoers rule, the command, the clone (only if it has no local changes),
-#   the ~/.claude-awake state folder, and the PATH line this installer added.
+#   restores normal sleep and Low Power Mode if a run is active or crashed,
+#   removes the optional sudoers rule, the command, the clone (only if it has
+#   no local changes), the ~/.claude-awake state folder, and the PATH line
+#   this installer added.
 #
 # Settings (environment variables, same for install and uninstall):
 #   CLAUDE_AWAKE_DIR  where to clone      (default: ~/src/claude-awake)
@@ -117,8 +118,9 @@ is_our_command() {
 do_uninstall() {
   local state="$HOME/.claude-awake" kept=0 removed=0
 
-  # 1. Put sleep back to normal if a run is active or a crashed run left it off.
-  if [ -f "$state/pid" ] || [ -f "$state/original-sleep-disabled" ]; then
+  # 1. Put sleep (and Low Power Mode) back if a run is active or a crashed run
+  #    left them changed.
+  if [ -f "$state/pid" ] || [ -f "$state/original-sleep-disabled" ] || [ -f "$state/original-low-power" ]; then
     if [ -x "$TARGET" ]; then
       say "Restoring normal sleep (may ask for your password)"
       with_tty "$TARGET" stop || warn "Could not restore sleep. Run: sudo pmset -a disablesleep 0"
