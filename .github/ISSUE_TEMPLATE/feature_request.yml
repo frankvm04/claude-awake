@@ -1,0 +1,28 @@
+name: Feature request
+description: Suggest something claude-awake could do.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What would this help with?
+      description: The situation or problem, in your own words.
+      placeholder: When I close the lid during a long Claude Code session, I'd like...
+    validations:
+      required: true
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: What should claude-awake do?
+      description: How you imagine it working, for example a new option or a different default.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Anything else? (optional)
+      description: Workarounds you use today, or other tools that do something similar.
+    validations:
+      required: false

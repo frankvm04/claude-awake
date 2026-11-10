@@ -4,6 +4,15 @@ All notable changes to claude-awake. Versions follow [Semantic Versioning](https
 
 ## [Unreleased]
 
+### Added
+
+- `claude-awake diagnose`: prints what a bug report needs (versions, `status`,
+  sleep and Low Power Mode settings, lid sensor, thermal pressure, battery
+  temperature keys, displays, `setup-sudo` state). Read-only, no password, and
+  safe to paste: no username, computer name, or serial numbers. Runs on any Mac.
+- Issue templates: a bug report form that asks for the `diagnose` output, and a
+  feature request form.
+
 ## [1.2.0] - 2026-11-10
 
 ### Added

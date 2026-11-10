@@ -146,6 +146,7 @@ claude-awake -v -c           # log events; stop when Claude quits
 claude-awake -T 40           # sleep the Mac if the battery stays at 40 °C or more
 claude-awake status          # what's the current state?
 claude-awake stop            # restore normal sleep (e.g. after a force-kill)
+claude-awake diagnose        # details to paste into a bug report
 ```
 
 | Option | Meaning |
@@ -297,6 +298,21 @@ sudo pmset -a disablesleep 0
   holds when you start claude-awake with the lid already closed on a monitor. The
   external monitor still dims after your usual display-sleep time, as normal.
 - To uninstall, see [Uninstall](#uninstall).
+
+## Reporting a problem
+
+[Open an issue](https://github.com/frankvm04/claude-awake/issues/new/choose) and
+choose **Bug report**. It asks for the output of:
+
+```bash
+claude-awake diagnose
+```
+
+That prints your claude-awake and macOS versions, `status`, and the readings
+claude-awake relies on: the sleep and Low Power Mode settings, the lid sensor,
+thermal pressure, battery temperature, displays, and whether `setup-sudo` is in
+place. It only reads information, needs no password, and leaves out your
+username, computer name, and serial numbers. Look it over before posting.
 
 ## Changes
 

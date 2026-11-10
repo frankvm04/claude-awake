@@ -76,6 +76,7 @@ ${B}Usage${RST}
   $PROG status              Show sleep setting, lid, displays, power, and Claude
   $PROG setup-sudo          Let pmset run without a password prompt (optional)
   $PROG remove-sudo         Undo setup-sudo
+  $PROG diagnose            Print details to paste into a bug report (read-only)
   $PROG help
 
 ${B}Options for start${RST}
@@ -403,6 +404,84 @@ EOF
   ok "Done. '$PROG' can now change lid-close sleep and Low Power Mode without a password."
   say "${DIM}The rule only allows: pmset -a disablesleep 0|1, pmset -b lowpowermode 0|1,"
   say "pmset -b powermode 0|1|2. Undo with: $PROG remove-sudo${RST}"
+}
+
+cmd_diagnose() {
+  # Read-only. Prints what a bug report needs, in a form that's safe to paste
+  # publicly: no username, hostname, or serial numbers; $HOME is shown as ~.
+  # Runs on any Mac (no MacBook check), so "no lid" reports can be diagnosed too.
+  require_macos
+  B=""; DIM=""; RED=""; GRN=""; YLW=""; RST=""     # plain text only
+
+  local self dir commit c
+  self="$0"
+  [ -L "$self" ] && self="$(readlink "$self")"
+  dir="$(cd "$(dirname "$self")" 2>/dev/null && pwd)"
+  commit=""
+  if [ -d "$dir/.git" ] && command -v git >/dev/null 2>&1 && xcode-select -p >/dev/null 2>&1; then
+    commit="$(git -C "$dir" rev-parse --short HEAD 2>/dev/null)"
+    [ -n "$(git -C "$dir" status --porcelain 2>/dev/null)" ] && commit="$commit, with local changes"
+  fi
+  tidy() { awk -v h="$HOME" '{ while ((i = index($0, h)) > 0) $0 = substr($0, 1, i - 1) "~" substr($0, i + length(h)); print }'; }
+  sect() { printf '\n## %s\n' "$1"; }
+
+  echo "claude-awake diagnose: paste everything below into the bug report."
+  echo "It contains no names, serial numbers, or file contents. Please review it before posting."
+
+  sect "Versions"
+  echo "claude-awake: $VERSION${commit:+ (git $commit)}"
+  echo "installed at: $(printf '%s' "$dir" | tidy)"
+  echo "macOS: $(sw_vers -productVersion 2>/dev/null) ($(sw_vers -buildVersion 2>/dev/null))"
+  echo "hardware: $(sysctl -n hw.model 2>/dev/null), $(uname -m)"
+  echo "bash: $BASH_VERSION"
+
+  sect "claude-awake status"
+  ( cmd_status ) 2>&1 | tidy | sed '1{/^claude-awake status$/d;}'
+
+  sect "Sleep and power (pmset)"
+  "$PMSET" -g 2>&1 | grep -E 'SleepDisabled|lowpowermode|powermode|^ *sleep |displaysleep|hibernatemode' || echo "(no matching settings)"
+  echo "Low Power Mode by profile:"
+  "$PMSET" -g custom 2>&1 | awk '
+    /^[^[:space:]].*:[[:space:]]*$/ { sect = $0; next }
+    $1 == "lowpowermode" || $1 == "powermode" { print "  " sect " " $1 " " $2; found = 1 }
+    END { if (!found) print "  (no lowpowermode or powermode setting)" }'
+  "$PMSET" -g batt 2>&1
+
+  sect "Lid sensor (ioreg)"
+  "$IOREG" -r -k AppleClamshellState -d 4 2>&1 | grep -oE '"AppleClamshell[A-Za-z]*" = [A-Za-z]+' || echo "(no lid sensor found)"
+
+  sect "Heat readings"
+  echo "thermal pressure: $("$NOTIFYUTIL" -g com.apple.system.thermalpressurelevel 2>&1)"
+  echo "battery temperature keys (AppleSmartBattery):"
+  "$IOREG" -r -n AppleSmartBattery 2>&1 | grep -oE '"[A-Za-z]*Temp[A-Za-z]*" ?= ?[0-9]+' | sort -u | sed 's/^/  /' | grep . || echo "  (none)"
+
+  sect "Displays (system_profiler, serial numbers removed)"
+  "$SYSPROF" SPDisplaysDataType 2>&1 | awk '
+    /^[[:space:]]*Displays:[[:space:]]*$/ { match($0, /^ */); din = RLENGTH; inblk = 1; print; next }
+    inblk {
+      if ($0 ~ /^[[:space:]]*$/) next
+      match($0, /^ */); if (RLENGTH <= din) { inblk = 0; next }
+      if (tolower($0) ~ /serial|edid|uuid|vendor id|product id/) next
+      print
+    }
+    END { if (din == "") print "(no displays listed)" }'
+
+  sect "Passwordless sudo (setup-sudo)"
+  if [ -f "$SUDOERS_FILE" ]; then echo "rule file: present"; else echo "rule file: not installed"; fi
+  for c in "-a disablesleep 1" "-b lowpowermode 1" "-b powermode 1"; do
+    # shellcheck disable=SC2086
+    if sudo -n -l "$PMSET" $c >/dev/null 2>&1; then echo "pmset $c: allowed without a password"
+    else echo "pmset $c: needs a password"; fi
+  done
+
+  sect "claude-awake state"
+  local pid
+  if pid="$(other_instance_pid)"; then echo "running: yes"; else echo "running: no"; fi
+  if [ -d "$STATE_DIR" ] && [ -n "$(ls -A "$STATE_DIR" 2>/dev/null)" ]; then
+    echo "state files: $(ls -A "$STATE_DIR" | grep -v '^pid$' | tr '\n' ' ')"
+  else
+    echo "state files: none"
+  fi
 }
 
 cmd_remove_sudo() {
@@ -823,6 +902,7 @@ case "${1:-start}" in
   status)                 cmd_status ;;
   setup-sudo)             cmd_setup_sudo ;;
   remove-sudo)            cmd_remove_sudo ;;
+  diagnose)               cmd_diagnose ;;
   help|--help|-h)         usage ;;
   version|--version|-V)   echo "claude-awake $VERSION" ;;
   *)                      die "unknown command: $1 (see '$PROG help')" ;;

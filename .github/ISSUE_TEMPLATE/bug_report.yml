@@ -1,0 +1,78 @@
+name: Bug report
+description: claude-awake doesn't do what the README says.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. Most issues depend on the Mac's model and macOS
+        version, so the output of `claude-awake diagnose` is the most useful part of this
+        report. It only reads information and doesn't need a password.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+      placeholder: |
+        I ran `claude-awake -c`, closed the lid on battery, and after a few minutes
+        the Mac went to sleep anyway.
+    validations:
+      required: true
+
+  - type: input
+    id: command
+    attributes:
+      label: Command you ran
+      placeholder: claude-awake -v -c
+    validations:
+      required: false
+
+  - type: dropdown
+    id: situation
+    attributes:
+      label: Situation when it happened
+      description: Choose all that apply.
+      multiple: true
+      options:
+        - Lid closed
+        - Lid open
+        - On battery
+        - Plugged in
+        - External monitor connected
+        - Started with the lid already closed
+    validations:
+      required: false
+
+  - type: textarea
+    id: diagnose
+    attributes:
+      label: Output of `claude-awake diagnose`
+      description: |
+        Run `claude-awake diagnose` in Terminal and paste everything it prints.
+        It contains no names or serial numbers, but please look it over before posting.
+        If your version doesn't have `diagnose`, update first: run the installer again.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: log
+    attributes:
+      label: Event log (optional)
+      description: |
+        If you can reproduce it, run the same command with `-v` and paste the lines
+        around the problem.
+      render: text
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I'm using the latest release (running the installer again updates it).
+          required: false
+        - label: I checked the README's Notes section for this behavior.
+          required: false

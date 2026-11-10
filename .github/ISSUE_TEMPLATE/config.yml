@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Install, usage, and options
+    url: https://github.com/frankvm04/claude-awake#readme
+    about: How to install, the options, the heat guard, and Low Power Mode are covered in the README.
