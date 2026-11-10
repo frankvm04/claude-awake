@@ -10,8 +10,8 @@ sleep setting comes back.
 unless an external display and power are connected (clamshell mode). The only
 built-in setting that stops lid-close sleep in every case is
 `sudo pmset -a disablesleep 1`. claude-awake turns that on, turns the screen off
-under the closed lid, watches battery and time limits, and turns the setting back
-off when it exits.
+under the closed lid, watches battery, heat and time limits, and turns the setting
+back off when it exits.
 
 ## Requirements
 
@@ -139,6 +139,7 @@ claude-awake                 # awake until Ctrl-C
 claude-awake -l -c           # open Claude, stay awake until Claude quits
 claude-awake -t 3 -b 30      # at most 3 hours; stop if battery drops to 30%
 claude-awake -v -c           # log events; stop when Claude quits
+claude-awake -T 40           # sleep the Mac if the battery stays at 40 °C or more
 claude-awake status          # what's the current state?
 claude-awake stop            # restore normal sleep (e.g. after a force-kill)
 ```
@@ -151,10 +152,13 @@ claude-awake stop            # restore normal sleep (e.g. after a force-kill)
 | `-t H`, `--hours H` | Stop after H hours (decimals OK) |
 | `-i S`, `--interval S` | Seconds between checks (default 30) |
 | `-v`, `--verbose` | Print a timestamped line for each event (see below) |
+| `-T C`, `--max-temp C` | Heat guard: battery temperature limit in °C (default 45, `0` = off) |
+| `-P L`, `--max-pressure L` | Heat guard: thermal pressure limit, `moderate`, `heavy`, `trapping`, or `off` (default `heavy`) |
+| `-H M`, `--heat-minutes M` | Heat guard: how long it must stay too hot before sleeping (default 2) |
 
 Start it in a Terminal window, then close the lid. It keeps running and shows a
-status line: elapsed time, power, the lid and screen state, and whether Claude is
-running. You can also start it with the lid already closed on an external monitor
+status line: elapsed time, power, temperature, the lid and screen state, and
+whether Claude is running. You can also start it with the lid already closed on an external monitor
 (clamshell mode); the monitor stays on.
 
 `claude-awake status` shows the current state at any time:
@@ -166,8 +170,36 @@ claude-awake status
   Claude          : running
   Lid             : closed
   External display: 1 connected (screens are left on)
+  Temperature     : battery 34.2 °C, pressure nominal
   Power           : AC, battery 92%
 ```
+
+## Heat guard
+
+If the Mac stays too hot, claude-awake turns normal sleep back on and puts the Mac
+to sleep (`pmset sleepnow`). Sleeping stops the heat, and your apps resume where
+they left off when you wake the Mac. claude-awake itself stops; start it again
+after waking.
+
+It watches two readings. Neither needs a password, and both work on Apple
+Silicon and Intel Macs:
+
+- **Battery temperature** (MacBooks), from `ioreg -r -n AppleSmartBattery`. The
+  default limit is 45 °C. A desktop Mac has no battery and uses pressure only.
+- **Thermal pressure**, the level macOS itself uses to decide when to slow the
+  processor: nominal, moderate, heavy, trapping, sleeping. It is read with
+  `notifyutil -g com.apple.system.thermalpressurelevel`. The default limit is
+  `heavy`.
+
+A reading must stay over its limit for 2 minutes (`-H`), so a short spike
+doesn't stop your work. At `trapping` or above it sleeps immediately. If neither
+reading is available, claude-awake says so at startup and runs without the heat
+guard.
+
+macOS still protects the hardware on its own: it slows the processor when it's
+hot and shuts down at critical temperatures. The heat guard acts earlier, before
+sustained heat under a closed lid wears the battery. Run with `-v` once to see
+your Mac's usual readings, then adjust `-T` or `-P` if needed.
 
 ## Event log (`-v`)
 
@@ -188,6 +220,8 @@ What gets logged:
 
 - The lid opening and closing, including how long it was closed.
 - External displays connecting and disconnecting.
+- Thermal pressure changes, and the heat guard warning, cooling down, or sleeping
+  the Mac.
 - The power source changing, and each 5% drop in battery while on battery.
 - Claude starting and quitting.
 - Anything that resets the sleep setting, and an expired sudo session.
@@ -202,8 +236,8 @@ claude-awake -v | tee ~/claude-awake.log
 
 ## Restoring sleep
 
-The setting is restored on Ctrl-C, on `kill`, when a limit is reached, and when
-the Terminal window is closed. If the process is force-killed (`kill -9`, crash,
+The setting is restored on Ctrl-C, on `kill`, when a limit is reached, after the
+heat guard's sleep, and when the Terminal window is closed. If the process is force-killed (`kill -9`, crash,
 power loss), sleep stays disabled. `claude-awake status` warns you about this, and
 `claude-awake stop` fixes it. You can also fix it by hand:
 

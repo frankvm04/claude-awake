@@ -11,6 +11,8 @@
 #     disablesleep=1 macOS may otherwise leave the panel lit under the lid).
 #     Skipped while an external display is connected: that command sleeps every
 #     display, and macOS already switches the built-in panel off in clamshell mode.
+#   * Heat guard: if the battery temperature or macOS's thermal pressure stays too
+#     high, it re-enables sleep and puts the Mac to sleep (`pmset sleepnow`).
 #   * When claude-awake exits (Ctrl-C, timer, battery guard, Claude quit, terminal
 #     closed), the original sleep setting is restored.
 #
@@ -27,6 +29,7 @@ SUDOERS_FILE="/etc/sudoers.d/claude-awake"
 PMSET="/usr/bin/pmset"
 IOREG="/usr/sbin/ioreg"
 SYSPROF="/usr/sbin/system_profiler"
+NOTIFYUTIL="/usr/bin/notifyutil"
 
 # Defaults (override with flags)
 BATTERY_MIN=20        # restore sleep when on battery and at/below this %
@@ -35,6 +38,9 @@ UNTIL_CLAUDE_EXITS=0  # 1 = stop once Claude is no longer running
 LAUNCH_APP=0          # 1 = open the Claude desktop app on start
 INTERVAL=30           # seconds between checks
 VERBOSE=0             # 1 = print timestamped event log lines
+MAX_TEMP=45           # sleep if battery stays at/above this °C (0 = off)
+MAX_PRESSURE=heavy    # sleep if thermal pressure stays at/above this (off = off)
+HEAT_MINUTES=2        # how long it must stay too hot before sleeping
 
 CAFF_PID=""
 CLEANED_UP=0
@@ -75,7 +81,13 @@ ${B}Options for start${RST}
   -t, --hours H             Stop after H hours (decimals OK, e.g. 2.5)
   -i, --interval S          Seconds between checks (default ${INTERVAL})
   -v, --verbose             Log events with timestamps (lid, screen, external
-                            displays, power, battery, Claude, sleep gaps)
+                            displays, power, battery, heat, Claude, sleep gaps)
+
+${B}Heat guard${RST} (puts the Mac to sleep if it stays too hot)
+  -T, --max-temp C          Battery temperature limit in °C (default ${MAX_TEMP}; 0 = off)
+  -P, --max-pressure LEVEL  Thermal pressure limit: moderate, heavy, trapping,
+                            or off (default ${MAX_PRESSURE})
+  -H, --heat-minutes M      How long it must stay too hot (default ${HEAT_MINUTES})
 
 ${B}Examples${RST}
   $PROG                      # awake until you press Ctrl-C
@@ -129,6 +141,62 @@ screen_off() {
   # so turn the display off explicitly. No sudo needed. Note this sleeps EVERY
   # display, so it must not be used while an external display is in use.
   "$PMSET" displaysleepnow >/dev/null 2>&1 || true
+}
+
+# Heat sensors. Both work without sudo on Apple Silicon and Intel Macs.
+
+read_battery_temp() {
+  # Sets BATT_TEMP10: battery temperature in tenths of a °C, empty if unknown
+  # (desktop Macs have no battery). AppleSmartBattery reports hundredths of a
+  # °C, e.g. "Temperature" = 3055 is 30.55 °C.
+  local raw
+  raw="$("$IOREG" -r -n AppleSmartBattery 2>/dev/null |
+         awk '/"Temperature" = [0-9]/ { sub(/.*"Temperature" = /, ""); print $1 + 0; exit }')"
+  BATT_TEMP10=""
+  case "$raw" in ''|*[!0-9]*) return 0 ;; esac
+  if [ "$raw" -gt 0 ] && [ "$raw" -lt 10000 ]; then BATT_TEMP10=$((raw / 10)); fi
+}
+
+pressure_rank() {
+  # Name -> rank on our scale: 0 nominal, 1 moderate, 2 heavy, 3 trapping, 4 sleeping.
+  case "$1" in
+    nominal) echo 0 ;; moderate) echo 1 ;; heavy) echo 2 ;;
+    trapping|critical) echo 3 ;; sleeping) echo 4 ;; *) echo "" ;;
+  esac
+}
+
+read_pressure() {
+  # Sets PRESSURE (rank, empty if unknown) and PRESSURE_NAME from the thermal
+  # pressure level macOS publishes (the same signal that drives throttling).
+  local v
+  v="$("$NOTIFYUTIL" -g com.apple.system.thermalpressurelevel 2>/dev/null | awk '{ print $NF; exit }')"
+  PRESSURE=""; PRESSURE_NAME="unknown"
+  case "$v" in ''|*[!0-9]*) return 0 ;; esac
+  # macOS numbers the levels 0-4. Apple's other platforms use 0,10,...,50 with
+  # 10 = "light"; accept both.
+  if [ "$v" -ge 10 ]; then
+    case "$v" in
+      10) PRESSURE_NAME=light; PRESSURE=0 ;;
+      20) PRESSURE_NAME=moderate ;; 30) PRESSURE_NAME=heavy ;;
+      40) PRESSURE_NAME=trapping ;; *) PRESSURE_NAME=sleeping ;;
+    esac
+  else
+    case "$v" in
+      0) PRESSURE_NAME=nominal ;; 1) PRESSURE_NAME=moderate ;; 2) PRESSURE_NAME=heavy ;;
+      3) PRESSURE_NAME=trapping ;; *) PRESSURE_NAME=sleeping ;;
+    esac
+  fi
+  [ -n "$PRESSURE" ] || PRESSURE="$(pressure_rank "$PRESSURE_NAME")"
+}
+
+fmt_temp() { printf '%d.%d °C' $(($1 / 10)) $(($1 % 10)); }
+
+heat_summary() {
+  # One line describing current heat readings, e.g. "battery 34.2 °C, pressure nominal".
+  local out=""
+  [ -n "$BATT_TEMP10" ] && out="battery $(fmt_temp "$BATT_TEMP10")"
+  [ -n "$PRESSURE" ] && out="${out:+$out, }pressure $PRESSURE_NAME"
+  printf '%s' "${out:-unavailable}"
 }
 
 external_display_count() {
@@ -200,6 +268,8 @@ cmd_status() {
   ext="$(external_display_count)"
   if [ "$ext" -gt 0 ]; then say "  External display: $ext connected (screens are left on)"
   else say "  External display: none"; fi
+  read_battery_temp; read_pressure
+  say "  Temperature     : $(heat_summary)"
   if [ -n "$BATT_PCT" ]; then
     if [ "$ON_AC" = "1" ]; then say "  Power           : AC, battery ${BATT_PCT}%"
     else say "  Power           : battery ${BATT_PCT}%"; fi
@@ -262,7 +332,11 @@ cleanup() {
   [ -f "$ORIG_FILE" ] && orig="$(cat "$ORIG_FILE")"
   if set_sleep_disabled "$orig"; then
     rm -f "$ORIG_FILE" "$PID_FILE"
-    ok "Sleep setting restored (SleepDisabled=$orig). Closing the lid will sleep normally."
+    if [ "$orig" = "1" ]; then
+      ok "Sleep setting restored (SleepDisabled=1, as it was before claude-awake started)."
+    else
+      ok "Sleep setting restored (SleepDisabled=0). Closing the lid will sleep normally."
+    fi
   else
     rm -f "$PID_FILE"
     warn "Could NOT restore the sleep setting. Run: $PROG stop   (or: sudo pmset -a disablesleep 0)"
@@ -292,6 +366,26 @@ stop_with() {
   exit 0
 }
 
+heat_sleep() {
+  # $1 = what was too hot, $2 = for how long (optional). Put the Mac to sleep now.
+  local msg="Too hot${2:+ for $2}: $1"
+  event "${RED}${msg} — putting the Mac to sleep${RST}"
+  printf '\n'
+  warn "${msg}. Putting the Mac to sleep."
+  notify "${msg}. Putting the Mac to sleep."
+  [ -n "$CAFF_PID" ] && kill "$CAFF_PID" 2>/dev/null
+  CAFF_PID=""
+  # Sleep must be allowed for sleepnow to work, even if it was disabled before
+  # claude-awake started; the original setting is restored when we exit.
+  set_sleep_disabled 0 >/dev/null 2>&1 || warn "Could not re-enable sleep."
+  "$PMSET" sleepnow >/dev/null 2>&1 || warn "pmset sleepnow failed."
+  # The Mac sleeps within seconds and this process freezes; after wake it
+  # resumes here, exits, and cleanup restores the original sleep setting.
+  sleep 20 &
+  wait $! 2>/dev/null
+  exit 0
+}
+
 cmd_start() {
   require_macos
 
@@ -303,6 +397,9 @@ cmd_start() {
       -t|--hours)              shift; MAX_HOURS="${1:-}" ;;
       -i|--interval)           shift; INTERVAL="${1:-}" ;;
       -v|--verbose)            VERBOSE=1 ;;
+      -T|--max-temp)           shift; MAX_TEMP="${1:-}" ;;
+      -P|--max-pressure)       shift; MAX_PRESSURE="${1:-}" ;;
+      -H|--heat-minutes)       shift; HEAT_MINUTES="${1:-}" ;;
       -h|--help)               usage; exit 0 ;;
       *) die "unknown option: $1 (see '$PROG help')" ;;
     esac
@@ -310,6 +407,15 @@ cmd_start() {
   done
 
   case "$BATTERY_MIN" in ''|*[!0-9]*) die "--battery-min needs a whole number 0-100." ;; esac
+  case "$MAX_TEMP"    in ''|*[!0-9]*) die "--max-temp needs a whole number of °C (0 = off)." ;; esac
+  local max_pressure_rank=0
+  if [ "$MAX_PRESSURE" != "off" ]; then
+    max_pressure_rank="$(pressure_rank "$MAX_PRESSURE")"
+    case "$max_pressure_rank" in 1|2|3) ;; *) die "--max-pressure must be moderate, heavy, trapping, or off." ;; esac
+  fi
+  printf '%s' "$HEAT_MINUTES" | grep -Eq '^[0-9]+(\.[0-9]+)?$' || die "--heat-minutes needs a number, e.g. 2 or 0.5"
+  local heat_grace
+  heat_grace="$(awk -v m="$HEAT_MINUTES" 'BEGIN { printf "%d", m * 60 }')"
   case "$INTERVAL"    in ''|*[!0-9]*|0) die "--interval needs a positive whole number." ;; esac
   printf '%s' "$MAX_HOURS" | grep -Eq '^[0-9]+(\.[0-9]+)?$' || die "--hours needs a number, e.g. 2 or 1.5"
   local max_secs
@@ -359,6 +465,15 @@ cmd_start() {
   ok "Your Mac will stay awake with the lid closed. ${DIM}(Ctrl-C to stop)${RST}"
   [ "$VERBOSE" = "1" ] && say "  • Verbose: logging lid, screen, power, battery and Claude events"
   [ "$BATTERY_MIN" -gt 0 ] && say "  • Stops if on battery at ${BATTERY_MIN}% or below"
+  read_battery_temp; read_pressure
+  local heat_rules=""
+  [ "$MAX_TEMP" -gt 0 ] && [ -n "$BATT_TEMP10" ] && heat_rules="battery ≥ ${MAX_TEMP} °C"
+  [ "$max_pressure_rank" -gt 0 ] && [ -n "$PRESSURE" ] && heat_rules="${heat_rules:+$heat_rules or }thermal pressure ≥ ${MAX_PRESSURE}"
+  if [ -n "$heat_rules" ]; then
+    say "  • Sleeps the Mac if ${heat_rules} for ${HEAT_MINUTES} min (now: $(heat_summary))"
+  elif [ "$MAX_TEMP" -gt 0 ] || [ "$max_pressure_rank" -gt 0 ]; then
+    warn "Can't read any temperature on this Mac, so the heat guard is off."
+  fi
   [ "$max_secs" -gt 0 ]    && say "  • Stops after ${MAX_HOURS} hour(s)"
   [ "$UNTIL_CLAUDE_EXITS" = "1" ] && say "  • Stops when Claude quits"
   say "  ${DIM}Keep it on a hard surface; don't put it in a bag while running.${RST}"
@@ -376,6 +491,8 @@ cmd_start() {
   local next_check=0 lid_was_closed=-1 lid_closed_at=0 last_screen_off=-999
   local prev_on_ac="" prev_batt_step="" prev_claude="" sudo_warned=0 is_running
   local ext=0 prev_ext="" next_display_check=0
+  # Heat guard: checked every HEAT_CHECK s; must stay too hot for heat_grace s.
+  local HEAT_CHECK=10 next_heat_check=0 hot_since="" hot_reason prev_pressure="" heat_str=""
   while :; do
     now=$SECONDS
 
@@ -472,9 +589,48 @@ cmd_start() {
       fi
     fi
 
+    if [ "$now" -ge "$next_heat_check" ]; then
+      next_heat_check=$((now + HEAT_CHECK))
+      read_battery_temp; read_pressure
+
+      if [ -n "$PRESSURE" ] && [ "$PRESSURE_NAME" != "$prev_pressure" ]; then
+        [ -n "$prev_pressure" ] && event "Thermal pressure: $PRESSURE_NAME"
+        prev_pressure=$PRESSURE_NAME
+      fi
+
+      hot_reason=""
+      if [ "$MAX_TEMP" -gt 0 ] && [ -n "$BATT_TEMP10" ] && [ "$BATT_TEMP10" -ge $((MAX_TEMP * 10)) ]; then
+        hot_reason="battery $(fmt_temp "$BATT_TEMP10") (limit ${MAX_TEMP} °C)"
+      fi
+      if [ "$max_pressure_rank" -gt 0 ] && [ -n "$PRESSURE" ] && [ "$PRESSURE" -ge "$max_pressure_rank" ]; then
+        hot_reason="${hot_reason:+$hot_reason; }thermal pressure $PRESSURE_NAME"
+      fi
+
+      if [ -n "$hot_reason" ]; then
+        if [ "$max_pressure_rank" -gt 0 ] && [ -n "$PRESSURE" ] && [ "$PRESSURE" -ge 3 ]; then
+          heat_sleep "$hot_reason"            # trapping/sleeping: act immediately
+        elif [ -z "$hot_since" ]; then
+          hot_since=$now
+          event "${YLW}Too hot: $hot_reason — will sleep the Mac if it lasts ${HEAT_MINUTES} min${RST}"
+        elif [ $((now - hot_since)) -ge "$heat_grace" ]; then
+          heat_sleep "$hot_reason" "$(fmt_duration $((now - hot_since)))"
+        fi
+      elif [ -n "$hot_since" ]; then
+        event "Cooled down after $(fmt_duration $((now - hot_since))) ($(heat_summary))"
+        hot_since=""
+      fi
+
+      heat_str=""
+      [ -n "$BATT_TEMP10" ] && heat_str="$(fmt_temp "$BATT_TEMP10")"
+      if [ -n "$PRESSURE" ] && { [ "$PRESSURE" -gt 0 ] || [ -z "$BATT_TEMP10" ]; }; then
+        heat_str="${heat_str:+$heat_str }pressure $PRESSURE_NAME"
+      fi
+      [ -n "$hot_since" ] && heat_str="${YLW}${heat_str} HOT${RST}"
+    fi
+
     elapsed=$((now - start))
-    STATUS_LINE="$(printf '%sawake%s %s │ %s │ lid %s │ Claude: %s' \
-      "$GRN" "$RST" "$(fmt_duration "$elapsed")" "$power_str" "$lid_str" "$claude_str")"
+    STATUS_LINE="$(printf '%sawake%s %s │ %s%s │ lid %s │ Claude: %s' \
+      "$GRN" "$RST" "$(fmt_duration "$elapsed")" "$power_str" "${heat_str:+ │ $heat_str}" "$lid_str" "$claude_str")"
     draw_status
 
     if [ -n "$BATT_PCT" ] && [ "$ON_AC" = "0" ] && [ "$BATTERY_MIN" -gt 0 ] && [ "$BATT_PCT" -le "$BATTERY_MIN" ]; then

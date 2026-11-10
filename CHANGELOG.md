@@ -2,6 +2,23 @@
 
 All notable changes to claude-awake. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Heat guard: if the battery temperature or macOS's thermal pressure stays over
+  its limit (default 45 °C or `heavy`, for 2 minutes), claude-awake re-enables
+  sleep and puts the Mac to sleep. It sleeps immediately at `trapping` or above.
+  Options `-T/--max-temp`, `-P/--max-pressure`, and `-H/--heat-minutes`. Works
+  without a password on Apple Silicon and Intel Macs, with or without a battery.
+- `status`, the status line, and `-v` show battery temperature and thermal
+  pressure.
+
+### Fixed
+
+- The exit message no longer says the lid will sleep normally when sleep was
+  already disabled before claude-awake started.
+
 ## [1.0.0] - 2026-11-09
 
 First release.
@@ -45,4 +62,5 @@ First release.
 - Optional `claude-awake setup-sudo` adds a sudoers rule for
   `pmset -a disablesleep 0|1` only, so no password prompt is needed.
 
+[Unreleased]: https://github.com/frankvm04/claude-awake/compare/v1.0.0...main
 [1.0.0]: https://github.com/frankvm04/claude-awake/releases/tag/v1.0.0
