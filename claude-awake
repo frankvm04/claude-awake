@@ -832,7 +832,7 @@ event() {
     [ "${#text}" -gt "$room" ] && text="${text:0:$((room - 1))}…"
   fi
   printf '  %s%s %s%s %s%s%s %s%s%s%s\n' "$C_GRY2" "$t" "$conn" "$C_R" "$col" "$sym" "$C_R" \
-    "$text" "${detail:+ $C_GRY— }" "$detail" "${detail:+$C_R}"
+    "$text" "${detail:+ ${C_GRY}— }" "$detail" "${detail:+${C_R}}"
   ui_draw
 }
 
