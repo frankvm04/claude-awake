@@ -4,6 +4,8 @@ All notable changes to claude-awake. Versions follow [Semantic Versioning](https
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-10
+
 ### Added
 
 - Low Power Mode: with the lid closed, on battery, at 35% or below (`-L N`,
@@ -87,6 +89,7 @@ First release.
 - Optional `claude-awake setup-sudo` adds a sudoers rule for
   `pmset -a disablesleep 0|1` only, so no password prompt is needed.
 
-[Unreleased]: https://github.com/frankvm04/claude-awake/compare/v1.1.0...main
+[Unreleased]: https://github.com/frankvm04/claude-awake/compare/v1.2.0...main
+[1.2.0]: https://github.com/frankvm04/claude-awake/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/frankvm04/claude-awake/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/frankvm04/claude-awake/releases/tag/v1.0.0
