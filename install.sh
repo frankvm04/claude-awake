@@ -121,9 +121,9 @@ is_our_command() {
 do_uninstall() {
   local state="$HOME/.claude-awake" kept=0 removed=0
 
-  # 1. Put sleep (and Low Power Mode) back if a run is active or a crashed run
+  # 1. Put sleep (and Low Power Mode, sound) back if a run is active or a crashed run
   #    left them changed.
-  if [ -f "$state/pid" ] || [ -f "$state/original-sleep-disabled" ] || [ -f "$state/original-low-power" ]; then
+  if [ -f "$state/pid" ] || [ -f "$state/original-sleep-disabled" ] || [ -f "$state/original-low-power" ] || [ -f "$state/original-muted" ]; then
     if [ -x "$TARGET" ]; then
       say "Restoring normal sleep (may ask for your password)"
       with_tty "$TARGET" stop || warn "Could not restore sleep. Run: sudo pmset -a disablesleep 0"

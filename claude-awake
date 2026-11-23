@@ -15,6 +15,8 @@
 #     high, it re-enables sleep and puts the Mac to sleep (`pmset sleepnow`).
 #   * Low Power Mode: with the lid closed on battery at/below 35%, it turns Low
 #     Power Mode on; opening the lid or plugging in puts it back.
+#   * Sound: with the lid closed (and no external display) the sound output is
+#     muted; opening the lid puts it back. -S/--sound lets sounds play.
 #   * When claude-awake exits (Ctrl-C, timer, battery guard, Claude quit, terminal
 #     closed), the original sleep setting is restored.
 #
@@ -28,6 +30,8 @@ STATE_DIR="${HOME}/.claude-awake"
 ORIG_FILE="${STATE_DIR}/original-sleep-disabled"   # value to restore
 PID_FILE="${STATE_DIR}/pid"
 LPM_FILE="${STATE_DIR}/original-low-power"     # "<setting> <value>" to restore
+MUTE_FILE="${STATE_DIR}/original-muted"        # exists while we have muted the sound
+OSASCRIPT="/usr/bin/osascript"
 SUDOERS_FILE="/etc/sudoers.d/claude-awake"
 PMSET="/usr/bin/pmset"
 IOREG="/usr/sbin/ioreg"
@@ -47,6 +51,7 @@ HEAT_MINUTES=2        # how long it must stay too hot before sleeping
 LOW_POWER_AT=35       # Low Power Mode on battery at/below this % with the lid closed (0 = off)
 LOG_FILE=""           # --log FILE: also append every event to FILE as plain text
 UI_SIMPLE=0           # 1 = --simple: one status line, no banner or dashboard
+ALLOW_SOUND=0         # 1 = --sound: don't mute while the lid is closed
 
 CAFF_PID=""
 CLEANED_UP=0
@@ -65,7 +70,7 @@ die()  { printf '%s✗ %s:%s %s\n' "$RED" "$PROG" "$RST" "$*" >&2; exit 1; }
 
 notify() {
   # macOS notification banner; harmless if it fails.
-  /usr/bin/osascript -e "display notification \"$1\" with title \"claude-awake\"" >/dev/null 2>&1 || true
+  "$OSASCRIPT" -e "display notification \"$1\" with title \"claude-awake\"" >/dev/null 2>&1 || true
 }
 
 usage() {
@@ -91,6 +96,7 @@ ${B}Options for start${RST}
                             displays, power, battery, heat, Claude, sleep gaps)
       --log FILE            Also append every event to FILE as plain text
   -s, --simple              Simple display: one status line, no banner or dashboard
+  -S, --sound               Let sounds play while the lid is closed (default: muted)
 
 ${B}Heat guard${RST} (puts the Mac to sleep if it stays too hot)
   -T, --max-temp C          Battery temperature limit in °C (default ${MAX_TEMP}; 0 = off)
@@ -276,6 +282,25 @@ lpm_restore() {
   return 1
 }
 
+# Sound. Muted with the lid closed so music and alerts don't play under it. Uses
+# the same setting as the mute key; no sudo needed.
+
+sound_muted() {
+  # Prints true or false; nothing if this output can't be muted or read.
+  local v
+  v="$("$OSASCRIPT" -e 'output muted of (get volume settings)' 2>/dev/null)"
+  case "$v" in true|false) printf '%s' "$v" ;; esac
+}
+
+set_muted() { "$OSASCRIPT" -e "set volume output muted $1" >/dev/null 2>&1; }
+
+mute_restore() {
+  # Unmute if we muted (MUTE_FILE exists); leaves the sound alone otherwise.
+  [ -f "$MUTE_FILE" ] || return 0
+  if set_muted false; then rm -f "$MUTE_FILE"; return 0; fi
+  return 1
+}
+
 external_display_count() {
   # Prints how many non-built-in displays are connected and online.
   # system_profiler lists each display under a "Displays:" heading, one level
@@ -352,6 +377,11 @@ cmd_status() {
   else
     say "  Temperature     : $(heat_summary)"
   fi
+  case "$(sound_muted)" in
+    true)  say "  Sound           : muted$( [ -f "$MUTE_FILE" ] && printf ' (by claude-awake)')" ;;
+    false) say "  Sound           : on" ;;
+    *)     say "  Sound           : unknown (this output can't be muted)" ;;
+  esac
   if [ -n "$BATT_PCT" ]; then
     if [ "$ON_AC" = "1" ]; then say "  Power           : AC, battery ${BATT_PCT}%"
     else say "  Power           : battery ${BATT_PCT}%"; fi
@@ -364,6 +394,9 @@ cmd_status() {
     fi
     if [ -f "$LPM_FILE" ] && ! other_instance_pid >/dev/null; then
       warn "A previous run left Low Power Mode changed. Run: $PROG stop"
+    fi
+    if [ -f "$MUTE_FILE" ] && ! other_instance_pid >/dev/null; then
+      warn "A previous run left the sound muted. Run: $PROG stop"
     fi
   else
     say "  Power           : unknown (couldn't read the battery)"
@@ -390,6 +423,10 @@ cmd_stop() {
   if [ -f "$LPM_FILE" ]; then
     if lpm_restore; then ok "Low Power Mode restored to $LPM_RESTORED (battery setting)."
     else warn "Could not restore Low Power Mode. Check System Settings → Battery."; fi
+  fi
+  if [ -f "$MUTE_FILE" ]; then
+    if mute_restore; then ok "Sound turned back on."
+    else warn "Could not turn the sound back on. Press the mute key."; fi
   fi
 }
 
@@ -458,6 +495,9 @@ cmd_diagnose() {
   sect "Lid sensor (ioreg)"
   "$IOREG" -r -k AppleClamshellState -d 4 2>&1 | grep -oE '"AppleClamshell[A-Za-z]*" = [A-Za-z]+' || echo "(no lid sensor found)"
 
+  sect "Sound"
+  echo "output muted: $("$OSASCRIPT" -e 'output muted of (get volume settings)' 2>&1)"
+
   sect "Heat readings"
   echo "thermal pressure: $("$NOTIFYUTIL" -g com.apple.system.thermalpressurelevel 2>&1)"
   echo "battery temperature keys (AppleSmartBattery):"
@@ -508,6 +548,10 @@ cleanup() {
   SUDO_PROMPT_OK=1
   printf '\n'
   [ -n "$CAFF_PID" ] && kill "$CAFF_PID" 2>/dev/null
+  if [ -f "$MUTE_FILE" ]; then
+    if mute_restore; then ok "Sound turned back on."
+    else warn "Could NOT turn the sound back on. Run: $PROG stop"; fi
+  fi
   if [ -f "$LPM_FILE" ]; then
     if lpm_restore; then ok "Low Power Mode restored to $LPM_RESTORED (battery setting)."
     else warn "Could NOT restore Low Power Mode. Run: $PROG stop"; fi
@@ -607,7 +651,7 @@ ui_state() {
   S_LPM=${lpm_on:-0}; S_CLAUDE=${is_running:-}; S_HOT=${hot_since:-}
   S_GRACE=${heat_grace:-120}; S_NOW=${now:-$SECONDS}
   S_PCT=${BATT_PCT:-}; S_AC=${ON_AC:-1}; S_PR=${PRESSURE:-}; S_PRN=${PRESSURE_NAME:-unknown}
-  S_T10=${BATT_TEMP10:-}
+  S_T10=${BATT_TEMP10:-}; S_MUTE=${mute_on:-0}
 }
 
 heat_bar() {
@@ -649,6 +693,7 @@ ui_build_panel() {
   if [ "$S_LID" = "1" ]; then
     ui_put "" "closed"
     if [ "$S_EXT" -gt 0 ]; then ui_put "$C_GRY" " · external display on"; else ui_put "$C_GRY" " · screen off"; fi
+    [ "$S_MUTE" = "1" ] && ui_put "$C_GRY" " · muted"
   else
     ui_put "" "open"
   fi
@@ -732,6 +777,7 @@ ui_build_line() {
   else ui_put "$C_GRY" "?%"; fi
   pp[1]="$UI_P"; pc[1]="$UI_C"; ui_reset
   ui_put "" "lid "; if [ "$S_LID" = "1" ]; then ui_put "$C_CYN" "▣"; ui_put "" " closed"; else ui_put "$C_GRY2" "□"; ui_put "" " open"; fi
+  [ "$S_MUTE" = "1" ] && ui_put "$C_GRY" ", muted"
   pp[2]="$UI_P"; pc[2]="$UI_C"; ui_reset
   if [ -n "$S_HOT" ]; then ui_put "$C_B$C_RED" "too hot"; else ui_put "" "heat "; ui_put "$UI_HC" "$S_PRN"; fi
   pp[3]="$UI_P"; pc[3]="$UI_C"; ui_reset
@@ -813,6 +859,7 @@ event() {
     power-batt)   sym="↯"; col="$C_AMB" ;;
     battery)      sym="▪"; col="$C_AMB" ;;
     lpm)          sym="▾"; col="$C_YLW" ;;
+    sound)        sym="♪"; col="$C_CYN" ;;
     heat-ok)      sym="≈"; col="$C_GRN" ;;
     heat-warm)    sym="≈"; col="$C_AMB" ;;
     heat-hot)     sym="≈"; col="$C_RED" ;;
@@ -940,6 +987,7 @@ cmd_start() {
       -v|--verbose)            VERBOSE=1 ;;
       --log)                   shift; LOG_FILE="${1:-}"; [ -n "$LOG_FILE" ] || die "--log needs a file name." ;;
       -s|--simple)             UI_SIMPLE=1 ;;
+      -S|--sound)              ALLOW_SOUND=1 ;;
       -T|--max-temp)           shift; MAX_TEMP="${1:-}" ;;
       -P|--max-pressure)       shift; MAX_PRESSURE="${1:-}" ;;
       -H|--heat-minutes)       shift; HEAT_MINUTES="${1:-}" ;;
@@ -994,6 +1042,9 @@ cmd_start() {
   if [ -f "$LPM_FILE" ]; then
     lpm_restore && info "Restored Low Power Mode left changed by a previous run ($LPM_RESTORED)."
   fi
+  if [ -f "$MUTE_FILE" ]; then
+    mute_restore && info "Turned the sound back on (a previous run had muted it)."
+  fi
 
   trap cleanup EXIT
   trap 'exit 130' INT
@@ -1028,6 +1079,7 @@ cmd_start() {
   fi
   ck ok "lid-close sleep disabled"
   ck ok "screen off under the lid"
+  if [ "$ALLOW_SOUND" = "1" ]; then ck off "sound plays under the lid (-S)"; else ck ok "sound muted under the lid"; fi
   if [ -n "$heat_rule" ]; then
     ck ok "heat guard: $heat_rule, $HEAT_MINUTES min"; limits="heat: ${heat_rule#pressure ≥ } ${HEAT_MINUTES}m"
   elif [ "$MAX_TEMP" -gt 0 ] || [ "$max_pressure_rank" -gt 0 ]; then
@@ -1080,6 +1132,9 @@ cmd_start() {
   # Low Power Mode: lpm_on = we're in the low-power state (set by us, or it was
   # already on); lpm_failed stops retrying until the conditions change.
   local lpm_on=0 lpm_failed=0 lpm_notified=0 lpm_want lpm_cur lpm_why
+  # Sound: mute_on = we're in the muted state (we muted, or it was already muted);
+  # mute_failed stops retrying until the conditions change.
+  local mute_on=0 mute_failed=0 mute_warned=0 mute_check=0 mute_want mute_cur
   local is_running=""
 
   heat_bar; HEAT_HIST=( "$HB" "$HB" "$HB" "$HB" "$HB" "$HB" "$HB" "$HB" "$HB" "$HB" "$HB" "$HB" )
@@ -1136,6 +1191,44 @@ cmd_start() {
         event lid-open "Lid is open"
       fi
       lid_was_closed=0
+    fi
+
+    # Sound: muted while the lid is closed with no external display (the Mac is
+    # "dark"); opening the lid, or connecting a display, puts it back.
+    if [ "$ALLOW_SOUND" = "0" ]; then
+      mute_want=0
+      [ "$lid_was_closed" = "1" ] && [ "$ext" -eq 0 ] && mute_want=1
+      if [ "$mute_want" = "1" ] && [ "$mute_on" = "0" ] && [ "$mute_failed" = "0" ]; then
+        mute_cur="$(sound_muted)"
+        if [ "$mute_cur" = "true" ]; then
+          mute_on=1                                 # already muted: nothing to undo later
+        elif [ "$mute_cur" = "false" ]; then
+          echo false >"$MUTE_FILE"
+          if set_muted true; then
+            mute_on=1; mute_check=$now; event sound "Sound muted" "lid closed, no external display"
+          else
+            rm -f "$MUTE_FILE"; mute_failed=1
+            [ "$mute_warned" = "0" ] && { mute_warned=1; event warn "Could not mute the sound"; }
+          fi
+        else
+          mute_failed=1
+          [ "$mute_warned" = "0" ] && { mute_warned=1; event warn "Can't mute this sound output"; }
+        fi
+      elif [ "$mute_want" = "1" ] && [ -f "$MUTE_FILE" ] && [ $((now - mute_check)) -ge "$SCREEN_REPEAT" ]; then
+        # Headphones or another output can come back unmuted; mute again.
+        mute_check=$now
+        [ "$(sound_muted)" = "false" ] && set_muted true && event sound "Sound muted again" "the output changed"
+      elif [ "$mute_want" = "0" ]; then
+        if [ "$mute_on" = "1" ] && [ -f "$MUTE_FILE" ]; then
+          if mute_restore; then
+            if [ "$lid_was_closed" = "1" ]; then event sound "Sound back on" "external display connected"
+            else event sound "Sound back on" "lid opened"; fi
+          else
+            event warn "Could not turn the sound back on" "will retry at exit"
+          fi
+        fi
+        mute_on=0; mute_failed=0
+      fi
     fi
 
     # Low Power Mode: on with the lid closed, on battery, at/below LOW_POWER_AT.

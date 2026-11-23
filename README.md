@@ -130,8 +130,8 @@ curl -fsSL https://raw.githubusercontent.com/frankvm04/claude-awake/main/install
 
 Or, from the clone: `~/src/claude-awake/install.sh --uninstall`. This:
 
-- restores normal sleep and Low Power Mode, if a run is active or a crashed run
-  left them changed
+- restores normal sleep, Low Power Mode, and sound, if a run is active or a
+  crashed run left them changed
 - removes the `setup-sudo` rule, if there is one
 - removes `~/bin/claude-awake`, the clone, `~/.claude-awake/`, and the PATH line
   the installer added
@@ -168,6 +168,7 @@ claude-awake diagnose        # details to paste into a bug report
 | `-L N`, `--low-power-at N` | With the lid closed on battery at N% or below, turn on Low Power Mode (default 35, `0` = off) |
 | `--log FILE` | Also append every event to FILE as plain text (even without `-v`) |
 | `-s`, `--simple` | Simple display: no banner or dashboard, just one status line |
+| `-S`, `--sound` | Let sounds play while the lid is closed (by default they're muted) |
 
 Start it in a Terminal window, then close the lid. It keeps running. You can also
 start it with the lid already closed on an external monitor (clamshell mode); the
@@ -278,6 +279,22 @@ it turns on again. It's also put back when claude-awake exits, and
 - Set the level above the battery stop (`-b`, default 20%): for example Low
   Power Mode at 35%, stop at 20%.
 
+## Sound
+
+When the lid closes, claude-awake mutes the sound, so music, mail alerts, and
+other sounds don't play under the closed lid. It uses the same setting as the
+mute key, so no password is needed. Opening the lid turns the sound back on.
+
+- If the lid is closed onto an external display, the sound is left alone: in
+  that setup you're usually still using the Mac. Unplug the display with the
+  lid closed and the sound is muted.
+- If you had already muted the sound, it's left alone.
+- Connecting headphones can switch to an output that isn't muted. claude-awake
+  checks every 30 seconds while the lid is closed and mutes again.
+- It's also turned back on when claude-awake exits, and `claude-awake stop` (or
+  simply starting claude-awake again) turns it back on after a crash.
+- To let sounds play with the lid closed, use `-S` (`--sound`).
+
 ## Event log (`-v`)
 
 With `-v`, events scroll above the dashboard as a timeline:
@@ -299,6 +316,7 @@ What gets logged:
 - The lid opening and closing, including how long it was closed.
 - External displays connecting and disconnecting.
 - Low Power Mode turning on, and going back when the lid opens or you plug in.
+- The sound being muted, and turned back on.
 - Thermal pressure changes, and the heat guard warning, cooling down, or sleeping
   the Mac.
 - The power source changing, and each 5% drop in battery while on battery.

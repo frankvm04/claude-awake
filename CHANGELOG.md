@@ -4,6 +4,17 @@ All notable changes to claude-awake. Versions follow [Semantic Versioning](https
 
 ## [Unreleased]
 
+### Added
+
+- Sound is muted while the lid is closed, so music and alerts don't play under
+  it. Opening the lid, quitting, or `claude-awake stop` after a crash turn it
+  back on; a sound you had already muted is left alone. Not muted with the lid
+  closed onto an external display. Re-muted if headphones or another output
+  come back unmuted. `-S` / `--sound` lets sounds play.
+- The dashboard shows "muted", `status` and `diagnose` show the sound state, and
+  `-v` logs each change.
+- `install.sh --uninstall` also turns the sound back on after a crash.
+
 ## [1.4.0] - 2026-11-10
 
 ### Changed
