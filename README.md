@@ -100,13 +100,13 @@ Each release is tagged (see [Releases](https://github.com/frankvm04/claude-awake
 and the [changelog](CHANGELOG.md)). To use a tagged version from a clone:
 
 ```bash
-git -C ~/src/claude-awake fetch --tags && git -C ~/src/claude-awake checkout v1.4.0
+git -C ~/src/claude-awake fetch --tags && git -C ~/src/claude-awake checkout v1.5.0
 ```
 
 Or download that version's script directly:
 
 ```bash
-mkdir -p ~/bin && curl -fsSL https://raw.githubusercontent.com/frankvm04/claude-awake/v1.4.0/claude-awake -o ~/bin/claude-awake && chmod +x ~/bin/claude-awake
+mkdir -p ~/bin && curl -fsSL https://raw.githubusercontent.com/frankvm04/claude-awake/v1.5.0/claude-awake -o ~/bin/claude-awake && chmod +x ~/bin/claude-awake
 ```
 
 ### Skip the password prompt (optional)
@@ -187,8 +187,8 @@ At startup, a banner and a checklist of what's active:
 Then a dashboard, pinned at the bottom of the window and updated every second:
 
 ```
-╭─ claude-awake ─────────────────────────────────── 1.4.0 ─╮
-│ ⠹ AWAKE  0h 42m 10s              lid closed · screen off │
+╭─ claude-awake ─────────────────────────────────── 1.5.0 ─╮
+│ ⠹ AWAKE  0h 42m 10s      lid closed · screen off · muted │
 │                                                          │
 │ Battery   ▰▰▰▰▱▱▱▱▱▱▱▱  34% on battery  ▾ LPM            │
 │ Heat      ▁▁▁▁▃▃▃▁▁▁▁▁  nominal                          │

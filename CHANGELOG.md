@@ -4,6 +4,8 @@ All notable changes to claude-awake. Versions follow [Semantic Versioning](https
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-11-23
+
 ### Added
 
 - Sound is muted while the lid is closed, so music and alerts don't play under
@@ -140,7 +142,8 @@ First release.
 - Optional `claude-awake setup-sudo` adds a sudoers rule for
   `pmset -a disablesleep 0|1` only, so no password prompt is needed.
 
-[Unreleased]: https://github.com/frankvm04/claude-awake/compare/v1.4.0...main
+[Unreleased]: https://github.com/frankvm04/claude-awake/compare/v1.5.0...main
+[1.5.0]: https://github.com/frankvm04/claude-awake/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/frankvm04/claude-awake/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/frankvm04/claude-awake/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/frankvm04/claude-awake/compare/v1.1.0...v1.2.0
